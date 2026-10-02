@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Raw data
+*.csv
+
+# macOS
+.DS_Store
+
+# Python environment/configuration
+.env
+config.ini
+
+# Generated reports
+reports/
