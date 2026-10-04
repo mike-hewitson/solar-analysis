@@ -33,6 +33,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch, PathPatch
+from matplotlib.path import Path as MplPath
 
 
 PVGIS_URL = "https://re.jrc.ec.europa.eu/api/v5_3/seriescalc"
@@ -372,6 +375,10 @@ def simulate_year(pv_by_local_hour, load_profile, args, year, monthly_targets):
         pv_to_geyser = 0.0
         charge_input = 0.0
         discharge_output = 0.0
+        battery_to_household = 0.0
+        battery_to_geyser = 0.0
+        grid_to_household = 0.0
+        grid_to_geyser = 0.0
         grid = 0.0
         curtailed = 0.0
         peak_load = 0.0
@@ -382,30 +389,62 @@ def simulate_year(pv_by_local_hour, load_profile, args, year, monthly_targets):
             load = total_load[h]
             peak_load = max(peak_load, load)
 
-            direct = min(p, load)
-            pv_direct += direct
-            if geyser_sched[h] > 0:
-                pv_to_geyser += min(geyser_sched[h], max(0.0, p - non_geyser.get(h, 0.0)))
+            # Split each hour into non-geyser and geyser flows so the
+            # aggregate Sankey can show the actual destination of PV,
+            # battery and grid energy without double-counting the geyser.
+            non_h = non_geyser.get(h, 0.0)
+            geyser_h = geyser_sched[h]
 
-            surplus = max(0.0, p - load)
-            deficit = max(0.0, load - p)
+            direct_non = min(non_h, p)
+            remaining_pv = max(0.0, p - direct_non)
+            direct_geyser = min(geyser_h, remaining_pv)
+            remaining_pv = max(0.0, remaining_pv - direct_geyser)
 
-            if surplus > 0:
+            remaining_non = max(0.0, non_h - direct_non)
+            remaining_geyser = max(0.0, geyser_h - direct_geyser)
+            remaining_load = remaining_non + remaining_geyser
+
+            pv_direct += direct_non + direct_geyser
+            pv_to_geyser += direct_geyser
+
+            battery_to_non_h = 0.0
+            battery_to_geyser_h = 0.0
+            grid_to_non_h = 0.0
+            grid_to_geyser_h = 0.0
+
+            if remaining_pv > 0:
                 room = max(0.0, args.battery_kwh - start_soc)
-                charge_input_h = min(surplus, room / BATTERY_EFF)
+                charge_input_h = min(remaining_pv, room / BATTERY_EFF)
                 start_soc += charge_input_h * BATTERY_EFF
                 charge_input += charge_input_h
-                curtailed += max(0.0, surplus - charge_input_h)
-            elif deficit > 0:
+                curtailed_h = max(0.0, remaining_pv - charge_input_h)
+                curtailed += curtailed_h
+            elif remaining_load > 0:
                 available = max(0.0, start_soc - reserve_kwh)
-                battery_draw = min(deficit / BATTERY_EFF, available)
+                battery_draw = min(remaining_load / BATTERY_EFF, available)
                 start_soc -= battery_draw
                 delivered = battery_draw * BATTERY_EFF
                 discharge_output += delivered
-                remaining = deficit - delivered
+
+                # Household/non-geyser load gets battery energy first,
+                # matching the allocation convention used in the existing
+                # Sankey implementation.
+                battery_to_non_h = min(remaining_non, delivered)
+                battery_to_geyser_h = delivered - battery_to_non_h
+                remaining_non -= battery_to_non_h
+                remaining_geyser -= battery_to_geyser_h
+
+                remaining = max(0.0, remaining_non + remaining_geyser)
                 if remaining > 0:
+                    grid_to_non_h = min(remaining_non, remaining)
+                    grid_to_geyser_h = remaining - grid_to_non_h
                     grid += remaining
                     peak_grid = max(peak_grid, remaining)
+
+            battery_to_household += battery_to_non_h
+            battery_to_geyser += battery_to_geyser_h
+            grid_to_household += grid_to_non_h
+            grid_to_geyser += grid_to_geyser_h
 
             min_soc = min(min_soc, start_soc)
             max_soc = max(max_soc, start_soc)
@@ -418,6 +457,10 @@ def simulate_year(pv_by_local_hour, load_profile, args, year, monthly_targets):
         annual["pv_to_geyser"] += pv_to_geyser
         annual["charge"] += charge_input
         annual["discharge"] += discharge_output
+        annual["battery_to_household"] += battery_to_household
+        annual["battery_to_geyser"] += battery_to_geyser
+        annual["grid_to_household"] += grid_to_household
+        annual["grid_to_geyser"] += grid_to_geyser
         annual["grid"] += grid
         annual["curtailed"] += curtailed
 
@@ -428,6 +471,10 @@ def simulate_year(pv_by_local_hour, load_profile, args, year, monthly_targets):
         monthly[m]["pv_to_geyser"] += pv_to_geyser
         monthly[m]["charge"] += charge_input
         monthly[m]["discharge"] += discharge_output
+        monthly[m]["battery_to_household"] += battery_to_household
+        monthly[m]["battery_to_geyser"] += battery_to_geyser
+        monthly[m]["grid_to_household"] += grid_to_household
+        monthly[m]["grid_to_geyser"] += grid_to_geyser
         monthly[m]["grid"] += grid
         monthly[m]["curtailed"] += curtailed
 
@@ -440,6 +487,10 @@ def simulate_year(pv_by_local_hour, load_profile, args, year, monthly_targets):
             "pv_to_geyser_kwh": pv_to_geyser,
             "battery_charge_kwh": charge_input,
             "battery_discharge_kwh": discharge_output,
+            "battery_to_household_kwh": battery_to_household,
+            "battery_to_geyser_kwh": battery_to_geyser,
+            "grid_to_household_kwh": grid_to_household,
+            "grid_to_geyser_kwh": grid_to_geyser,
             "grid_kwh": grid,
             "curtailed_kwh": curtailed,
             "end_soc_kwh": start_soc,
@@ -447,7 +498,231 @@ def simulate_year(pv_by_local_hour, load_profile, args, year, monthly_targets):
             "peak_grid_kw": peak_grid,
         })
 
+    annual["year"] = year
     return daily, annual, monthly, min_soc, max_soc
+
+
+
+def make_sankey_chart(out_dir, annual, start_soc, end_soc, inverter_kw, battery_kwh, reserve):
+    """Create the aggregate annual Sankey using the simulation's actual flows.
+
+    The layout follows the Sankey-style chart used in the Step 6 simulation:
+    source boxes on the left, destinations on the right, smooth ribbons whose
+    widths are proportional to annual kWh, and explicit battery losses/SOC
+    change below the main flow.
+    """
+    pv_kwh = annual["pv"]
+    household_kwh = annual["load"] - annual["geyser"]
+    geyser_kwh = annual["geyser"]
+    pv_to_household = annual["pv_direct"] - annual["pv_to_geyser"]
+    pv_to_geyser = annual["pv_to_geyser"]
+    battery_charge = annual["charge"]
+    battery_discharge = annual["discharge"]
+    battery_to_household = annual["battery_to_household"]
+    battery_to_geyser = annual["battery_to_geyser"]
+    grid_to_household = annual["grid_to_household"]
+    grid_to_geyser = annual["grid_to_geyser"]
+    grid_import = annual["grid"]
+    curtailed = annual["curtailed"]
+
+    net_soc_change = end_soc - start_soc
+    battery_losses = battery_charge - battery_discharge - net_soc_change
+
+    # Hard reconciliation checks. These make the chart fail loudly rather
+    # than silently displaying an energy-flow error.
+    checks = {
+        "PV": pv_to_household + pv_to_geyser + battery_charge + curtailed - pv_kwh,
+        "household": pv_to_household + battery_to_household + grid_to_household - household_kwh,
+        "geyser": pv_to_geyser + battery_to_geyser + grid_to_geyser - geyser_kwh,
+        "grid": grid_to_household + grid_to_geyser - grid_import,
+        "battery": battery_to_household + battery_to_geyser - battery_discharge,
+    }
+    for name, error in checks.items():
+        if abs(error) > 1e-6:
+            raise RuntimeError(f"Sankey {name} reconciliation failed: {error:.9f} kWh")
+
+    # Keep the same dark, compact visual language as the existing Step 6 chart.
+    fig, ax = plt.subplots(figsize=(14, 7.5))
+    fig.patch.set_facecolor("#11161C")
+    ax.set_facecolor("#11161C")
+    ax.set_xlim(0, 160)
+    ax.set_ylim(0, 86)
+    ax.axis("off")
+
+    pv_color = "#F5B642"
+    battery_color = "#5BC0EB"
+    grid_color = "#B7BBC2"
+    household_color = "#6CC070"
+    geyser_color = "#E07A5F"
+    curtail_color = "#777D87"
+    node_edge = "#313943"
+    text_primary = "#F1F3F5"
+    text_muted = "#A8AFB8"
+
+    largest = max(pv_kwh, grid_import, battery_discharge, battery_charge,
+                  household_kwh, geyser_kwh, curtailed, 1.0)
+    flow_scale = 31.0 / largest
+    node_width = 27.0
+    left_x = 6.0
+    right_x = 127.0
+
+    def h(value):
+        return max(7.0, value * flow_scale)
+
+    def node(x, cy, title, value, color):
+        nh = h(value)
+        patch = FancyBboxPatch(
+            (x, cy - nh / 2), node_width, nh,
+            boxstyle="round,pad=0.0,rounding_size=2.2",
+            facecolor=color, edgecolor=node_edge, linewidth=0.6,
+            alpha=0.98, zorder=3,
+        )
+        ax.add_patch(patch)
+        ax.text(x + 2.3, cy + 2.5, title.upper(), color="#E9EDF2",
+                fontsize=7.3, fontweight="bold", ha="left", va="center", zorder=5)
+        ax.text(x + 2.3, cy - 1.8, f"{value:.1f}", color="#FFFFFF",
+                fontsize=15, fontweight="bold", ha="left", va="center", zorder=5)
+        ax.text(x + 2.3, cy - 5.2, "kWh", color="#E0E4EA",
+                fontsize=7.5, ha="left", va="center", zorder=5)
+        return {"x0": x, "x1": x + node_width,
+                "y0": cy - nh / 2, "y1": cy + nh / 2, "h": nh}
+
+    pv_box = node(left_x, 57, "PV", pv_kwh, pv_color)
+    battery_out_box = node(left_x, 39, "Battery out", battery_discharge, battery_color)
+    grid_box = node(left_x, 21, "Grid", grid_import, grid_color)
+
+    household_box = node(right_x, 58, "Household", household_kwh, household_color)
+    geyser_box = node(right_x, 40, "Geyser", geyser_kwh, geyser_color)
+    battery_in_box = node(right_x, 22, "Battery in", battery_charge, battery_color)
+    curtailed_box = node(right_x, 8, "Curtailed", curtailed, curtail_color) if curtailed > 1e-9 else None
+
+    def flow_slots(box, values, total_value, top=True):
+        total_value = max(float(total_value), 1e-12)
+        edge_inset = min(1.4, box["h"] * 0.12)
+        flow_h = max(box["h"] - 2.0 * edge_inset, 0.1)
+        cursor = box["y1"] - edge_inset if top else box["y0"] + edge_inset
+        out = []
+        for value in values:
+            fh = flow_h * max(0.0, float(value)) / total_value
+            if fh <= 1e-10:
+                out.append(None)
+                continue
+            cy = cursor - fh / 2 if top else cursor + fh / 2
+            out.append((cy, fh))
+            cursor = cursor - fh if top else cursor + fh
+        return out
+
+    def ribbon(box_a, slot_a, box_b, slot_b, color, alpha=0.58):
+        if slot_a is None or slot_b is None:
+            return
+        ya, ha = slot_a
+        yb, hb = slot_b
+        x0 = box_a["x1"] - 0.4
+        x1 = box_b["x0"] + 0.4
+        c1 = x0 + (x1 - x0) * 0.42
+        c2 = x0 + (x1 - x0) * 0.58
+
+        verts = [
+            (x0, ya + ha / 2),
+            (c1, ya + ha / 2),
+            (c2, yb + hb / 2),
+            (x1, yb + hb / 2),
+            (x1, yb - hb / 2),
+            (c2, yb - hb / 2),
+            (c1, ya - ha / 2),
+            (x0, ya - ha / 2),
+            (x0, ya + ha / 2),
+        ]
+        codes = [
+            MplPath.MOVETO, MplPath.CURVE4, MplPath.CURVE4, MplPath.CURVE4,
+            MplPath.LINETO, MplPath.CURVE4, MplPath.CURVE4, MplPath.CURVE4,
+            MplPath.CLOSEPOLY,
+        ]
+        ax.add_patch(PathPatch(
+            MplPath(verts, codes),
+            facecolor=color, edgecolor="none", alpha=alpha, zorder=1,
+        ))
+
+    pv_out = flow_slots(
+        pv_box, [pv_to_household, pv_to_geyser, battery_charge, curtailed],
+        pv_kwh
+    )
+    battery_out = flow_slots(
+        battery_out_box, [battery_to_household, battery_to_geyser],
+        battery_discharge
+    )
+    grid_out = flow_slots(
+        grid_box, [grid_to_household, grid_to_geyser], grid_import
+    )
+
+    house_in = flow_slots(
+        household_box, [pv_to_household, battery_to_household, grid_to_household],
+        household_kwh, top=False
+    )
+    geyser_in = flow_slots(
+        geyser_box, [pv_to_geyser, battery_to_geyser, grid_to_geyser],
+        geyser_kwh, top=False
+    )
+    batt_in = flow_slots(battery_in_box, [battery_charge], battery_charge, top=False)
+    curt_in = flow_slots(curtailed_box, [curtailed], curtailed, top=False) if curtailed_box else [None]
+
+    ribbon(pv_box, pv_out[0], household_box, house_in[0], pv_color)
+    ribbon(pv_box, pv_out[1], geyser_box, geyser_in[0], pv_color, 0.50)
+    ribbon(pv_box, pv_out[2], battery_in_box, batt_in[0], battery_color, 0.62)
+    if curtailed_box:
+        ribbon(pv_box, pv_out[3], curtailed_box, curt_in[0], curtail_color, 0.48)
+
+    ribbon(battery_out_box, battery_out[0], household_box, house_in[1], battery_color, 0.60)
+    ribbon(battery_out_box, battery_out[1], geyser_box, geyser_in[1], battery_color, 0.52)
+    ribbon(grid_box, grid_out[0], household_box, house_in[2], grid_color, 0.55)
+    ribbon(grid_box, grid_out[1], geyser_box, geyser_in[2], grid_color, 0.50)
+
+    ax.text(80, 80.5, "PVGIS — Annual Aggregate Energy Flow",
+            color=text_primary, fontsize=12, fontweight="bold",
+            ha="center", va="center")
+    ax.text(80, 77.8, "Ribbon width ∝ energy (kWh)",
+            color=text_muted, fontsize=7.5, ha="center", va="center")
+
+    if battery_losses > 1e-9:
+        ax.text(80, 5.0, f"Battery losses  {battery_losses:.1f} kWh",
+                color=text_muted, fontsize=7.5, ha="center", va="center")
+    if abs(net_soc_change) > 1e-9:
+        sign = "+" if net_soc_change > 0 else "−"
+        ax.text(80, 2.8, f"Net battery SOC change  {sign}{abs(net_soc_change):.1f} kWh",
+                color=text_muted, fontsize=7.2, ha="center", va="center")
+
+    footer = f"{battery_kwh:.0f} kWh usable battery  •  {inverter_kw:.0f} kW inverter  •  {reserve * 100:.0f}% reserve"
+    ax.text(80, 0.8, footer, color=text_muted, fontsize=7.2,
+            ha="center", va="center")
+
+    path = out_dir / f"pvgis {annual['year']} annual sankey.png"
+    fig.savefig(path, dpi=180, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+    csv_path = out_dir / f"pvgis {annual['year']} sankey energy flows.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["flow", "kwh"])
+        w.writerows([
+            ["PV generation", pv_kwh],
+            ["Household load", household_kwh],
+            ["Geyser load", geyser_kwh],
+            ["PV to household", pv_to_household],
+            ["PV to geyser", pv_to_geyser],
+            ["PV to battery", battery_charge],
+            ["PV curtailed", curtailed],
+            ["Battery to household", battery_to_household],
+            ["Battery to geyser", battery_to_geyser],
+            ["Battery discharge", battery_discharge],
+            ["Battery losses", battery_losses],
+            ["Grid to household", grid_to_household],
+            ["Grid to geyser", grid_to_geyser],
+            ["Grid import", grid_import],
+            ["Starting SOC", start_soc],
+            ["Ending SOC", end_soc],
+            ["Net SOC change", net_soc_change],
+        ])
+    return path, csv_path
 
 
 def write_csv(path, rows, fieldnames):
@@ -535,6 +810,14 @@ def main():
     worst_soc = sorted(daily, key=lambda x: x["end_soc_kwh"])[:10]
     write_csv(out / f"pvgis {args.year} worst grid days.csv", worst, daily_fields)
     write_csv(out / f"pvgis {args.year} lowest SOC days.csv", worst_soc, daily_fields)
+
+    sankey_path, sankey_csv = make_sankey_chart(
+        out, annual, args.battery_kwh, daily[-1]["end_soc_kwh"],
+        args.inverter_kw, args.battery_kwh, args.reserve
+    )
+    print(f"Sankey chart:               {sankey_path}")
+    print(f"Sankey flow data:            {sankey_csv}")
+    print()
 
     print("Monthly results:")
     print("Month  PV kWh  Load kWh  Grid kWh  End-of-month SOC")
