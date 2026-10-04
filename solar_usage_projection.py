@@ -450,6 +450,7 @@ def main():
     )
     print_daily_projection(projection)
     verify_monthly_totals(projection, complete_monthly)
+    save_daily_projection_to_database(db_path, projection)
 
 
 if __name__ == "__main__":

@@ -205,7 +205,64 @@ These reports are based on the measured Tuya data.
 
 ---
 
-# 7. Solar / battery simulation
+# 8. Annual load projection
+
+Script:
+
+```text
+solar_usage_projection.py
+```
+
+This script creates a full-year daily household-load projection from the
+available monthly electricity totals and the average daily load measured from
+all complete days in the Tuya database.
+
+The process is:
+
+1. Read the measured monthly electricity totals from `monthly-usage.csv`.
+2. Use a linear regression to estimate missing months.
+3. Calculate the average daily household, geyser and non-geyser consumption
+   from all complete days in `daily_load_summary`.
+4. For every day of the year, scale those daily averages up or down according
+   to the applicable month's total.
+5. Apply the same monthly scaling factor to the total, geyser and non-geyser
+   components.
+6. Verify that the projected daily values for each month add up to that
+   month's target total.
+7. Store the resulting daily projection in SQLite.
+
+The projection is therefore seasonal: October, for example, uses the October
+monthly total as its target, while the measured daily average supplies the
+household load shape and geyser/non-geyser split.
+
+The database table created by the script is:
+
+```sql
+daily_load_projection
+```
+
+Fields:
+
+```text
+projection_date
+month
+day
+scaling_factor
+total_energy_kwh
+geyser_energy_kwh
+non_geyser_energy_kwh
+```
+
+The projection table is separate from the measured-data tables. Running the
+projection script does not modify the original Tuya measurements or the
+`daily_load_summary` table.
+
+The script prints every seventh projected day for checking and also prints a
+monthly target-versus-projected verification.
+
+---
+
+# 8. Solar / battery simulation
 
 Main simulator:
 
@@ -251,7 +308,7 @@ a physical hot-water tank / thermostat model.
 
 ---
 
-# 8. Multi-day stress testing
+# 9. Multi-day stress testing
 
 The simulator supports continuous battery SOC across repeated days.
 
@@ -271,7 +328,7 @@ This is a scenario test, not a weather forecast.
 
 ---
 
-# 9. PVGIS Hermanus simulation
+# 10. PVGIS Hermanus simulation
 
 Script:
 
@@ -305,7 +362,7 @@ load is satisfied and the battery is full.
 
 ---
 
-# 10. 2023 PVGIS result — current reference
+# 11. 2023 PVGIS result — current reference
 
 Using the current measured 29 September load profile repeated throughout
 2023:
@@ -327,7 +384,7 @@ energy availability.
 
 ---
 
-# 11. Winter result
+# 12. Winter result
 
 The 2023 simulation identified June as the most difficult period.
 
@@ -357,7 +414,7 @@ than a single poor day.
 
 ---
 
-# 12. Battery sensitivity test
+# 13. Battery sensitivity test
 
 Script:
 
@@ -386,7 +443,7 @@ This is NOT yet a final sizing decision.
 
 ---
 
-# 13. Current modelling conclusions
+# 14. Current modelling conclusions
 
 The simulations currently indicate:
 
@@ -412,7 +469,7 @@ The simulations currently indicate:
 
 ---
 
-# 14. Next modelling priority
+# 15. Next modelling priority
 
 The next major improvement should NOT be another battery-size test.
 
@@ -428,10 +485,12 @@ Historical PVGIS solar profile
 15 kWh battery
 ```
 
-The current simulation repeats 29 September's load profile every day.
+The current simulation can use the new `daily_load_projection` table as a
+seasonal load model. The projection is based on the average measured daily
+load, scaled to the applicable monthly electricity total.
 
-As the Tuya database accumulates more data, replace that assumption with actual
-measured load profiles.
+As the Tuya database accumulates more data, replace this projection baseline
+with actual measured daily/hourly load profiles.
 
 The improved model should eventually distinguish:
 
@@ -450,7 +509,7 @@ defensible.
 
 ---
 
-# 15. Important modelling caveats
+# 16. Important modelling caveats
 
 The current results should not be treated as an engineering certification
 or a supplier quotation.
@@ -459,7 +518,8 @@ Specific limitations:
 
 - PVGIS is historical modelled solar data, not an on-site solar measurement.
 - The current household profile is based on a very short measurement period.
-- The current simulation repeats one measured day through the year.
+- The current annual projection is based on a short measured period and
+  scales the measured daily average to the projected monthly totals.
 - The geyser is not yet modelled as a thermal tank.
 - Oven behaviour is not yet represented realistically in the load profile.
 - The current model uses simplified battery efficiency and dispatch logic.
@@ -471,7 +531,7 @@ Specific limitations:
 
 ---
 
-# 16. Practical working sequence
+# 17. Practical working sequence
 
 The recommended sequence from here is:
 
@@ -501,7 +561,7 @@ The recommended sequence from here is:
 
 ---
 
-# 17. Files currently associated with the project
+# 18. Files currently associated with the project
 
 Core scripts:
 
@@ -509,6 +569,7 @@ Core scripts:
 tuya_power_extractor.py
 solar_analysis.py
 solar_report.py
+solar_usage_projection.py
 solar_battery_simulation.py
 solar_pvgis_simulation.py
 solar battery sensitivity.py
@@ -534,7 +595,7 @@ solar report/pvgis/pvgis cache/
 
 ---
 
-# 18. Python / macOS note
+# 19. Python / macOS note
 
 The current Mac Python installation produces this warning:
 
