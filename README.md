@@ -420,6 +420,7 @@ Script:
 
 ```text
 solar battery sensitivity.py
+solar_outage_simulation_updated.py
 ```
 
 This compares different battery sizes while keeping the PVGIS weather,
@@ -442,6 +443,130 @@ case rather than automatically increasing battery size.
 This is NOT yet a final sizing decision.
 
 ---
+
+---
+
+# 14. Grid-outage resilience simulation
+
+Script:
+
+```text
+solar_outage_simulation_updated.py
+```
+
+The outage simulation uses the historical 2023 PVGIS hourly production profile
+together with the current seasonal daily load projection. It tests every
+possible outage starting date in the PVGIS year for:
+
+- 1-day outages
+- 2-day outages
+- 3-day outages
+
+The primary outage-resilience test starts **every outage with a fully charged
+15 kWh usable battery**. This is intended to answer the practical question:
+
+> What happens if the grid fails unexpectedly while the battery is fully
+> charged?
+
+Current outage configuration:
+
+```text
+PV:                     7.0 kWp
+PV orientation:         3.5 kWp east + 3.5 kWp west
+Inverter reference:     8.0 kW
+Battery:                15.0 kWh usable
+Battery reserve:        20% / 3.0 kWh
+Starting SOC:            15.0 kWh
+PV data:                 PVGIS historical 2023
+Load model:              daily_load_projection
+```
+
+During an outage the dispatch priority is:
+
+```text
+PV → house load → battery
+                     ↓
+              surplus PV only
+                     ↓
+                  geyser
+```
+
+The geyser is deliberately treated as a discretionary load during an outage.
+It may only use surplus PV **after the battery is completely full**. The
+battery is therefore never deliberately discharged to heat the geyser.
+
+The simulation records:
+
+- starting, minimum and ending battery SOC
+- PV generation
+- non-geyser house load
+- unserved house load
+- geyser energy required
+- geyser energy actually heated
+- battery discharge
+- curtailed PV
+- whether the battery reserve was reached
+
+## Current full-battery outage results
+
+Using the current load projection and 2023 PVGIS weather:
+
+| Outage | Worst period | Minimum SOC | Unserved house load |
+|---|---|---:|---:|
+| 1 day | 27 Jun 2023 | 7.74 kWh | 0.00 kWh |
+| 2 days | 13–14 Jun 2023 | 5.08 kWh | 0.00 kWh |
+| 3 days | 25–27 Jun 2023 | 3.00 kWh | 1.26 kWh |
+
+The worst 1-day case generated only 2.29 kWh of PV against a 9.15 kWh
+non-geyser house load, yet the full battery still supplied the complete house
+load and ended at 7.74 kWh.
+
+The worst 2-day case generated 9.03 kWh against 18.30 kWh of non-geyser house
+load. The battery ended at 5.08 kWh and there was no unserved house load.
+
+The worst 3-day case was 25–27 June:
+
+```text
+Starting SOC:          15.00 kWh
+PV generation:         15.18 kWh
+House load:             27.45 kWh
+Battery discharge:      14.97 kWh
+Minimum / ending SOC:    3.00 kWh
+Unserved house load:      1.26 kWh
+Geyser heated:            0.00 kWh
+```
+
+This indicates that, in the current model, a full 15 kWh battery provides
+excellent resilience for one- and two-day grid outages and very nearly
+covers even the worst three-day winter sequence.
+
+A separate stress-test mode is available:
+
+```bash
+python3 solar_outage_simulation_updated.py --start-soc-mode normal
+```
+
+This starts each outage using the SOC reached by the preceding normal
+grid-connected simulation. It represents the different scenario where the
+grid fails after several poor-solar days have already depleted the battery.
+It should not be confused with the primary full-battery outage-resilience
+test.
+
+The complete outage-window results are written to:
+
+```text
+solar report/outage simulation/
+```
+
+Important interpretation:
+
+The outage simulation's "house load" excludes the geyser, because the geyser
+is intentionally treated as discretionary during an outage. Oven behaviour is
+also not yet explicitly represented in the measured load model.
+
+The outage simulation is a resilience study, not an engineering certification.
+It uses historical PVGIS weather and the current projected load model.
+
 
 # 14. Current modelling conclusions
 
@@ -552,11 +677,15 @@ The recommended sequence from here is:
         ↓
 8. Examine winter sequences
         ↓
-9. Examine inverter peak-load requirements
+9. Test 1 / 2 / 3-day grid-outage resilience
         ↓
-10. Model geyser control more realistically
+10. Examine inverter peak-load requirements
         ↓
-11. Compare supplier proposals against the resulting requirements
+11. Model geyser control more realistically
+        ↓
+12. Model oven behaviour during outages
+        ↓
+13. Compare supplier proposals against the resulting requirements
 ```
 
 ---
