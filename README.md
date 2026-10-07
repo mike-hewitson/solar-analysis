@@ -451,7 +451,7 @@ This is NOT yet a final sizing decision.
 Script:
 
 ```text
-solar_outage_simulation_updated.py
+solar_outage_simulation.py
 ```
 
 The outage simulation uses the historical 2023 PVGIS hourly production profile
@@ -543,7 +543,7 @@ covers even the worst three-day winter sequence.
 A separate stress-test mode is available:
 
 ```bash
-python3 solar_outage_simulation_updated.py --start-soc-mode normal
+python3 solar_outage_simulation.py --start-soc-mode normal
 ```
 
 This starts each outage using the SOC reached by the preceding normal
@@ -723,20 +723,3 @@ solar report/pvgis/pvgis cache/
 ```
 
 ---
-
-# 19. Python / macOS note
-
-The current Mac Python installation produces this warning:
-
-```text
-NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+,
-currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'
-```
-
-This warning does not currently prevent the Tuya or PVGIS scripts from working.
-
-A future cleanup step is to install a current Homebrew Python with a modern
-OpenSSL implementation and move the project to a dedicated virtual
-environment.
-
-That should be done after the current data/model workflow is stable.
