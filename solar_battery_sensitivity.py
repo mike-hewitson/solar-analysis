@@ -49,6 +49,8 @@ def run_case(base_script, year, battery, root):
         geyser_start=9,
         geyser_end=16,
         geyser_max_kw=3.0,
+        annual_target_kwh=mod.ANNUAL_PLANNING_KWH,
+        missing_month_kwh=None,
         no_download=False,
     )
 
@@ -65,8 +67,9 @@ def run_case(base_script, year, battery, root):
         pv[(ts.date(), ts.hour)] = p + west.get(ts, 0.0)
 
     load = mod.load_complete_measured_day(Path(a.db))
+    monthly_targets, _ = mod.build_monthly_targets(a)
     daily, annual, monthly, min_soc, max_soc = mod.simulate_year(
-        pv, load, a, year
+        pv, load, a, year, monthly_targets
     )
 
     june = monthly[6]
