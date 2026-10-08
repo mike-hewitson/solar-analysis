@@ -205,64 +205,7 @@ These reports are based on the measured Tuya data.
 
 ---
 
-# 8. Annual load projection
-
-Script:
-
-```text
-solar_usage_projection.py
-```
-
-This script creates a full-year daily household-load projection from the
-available monthly electricity totals and the average daily load measured from
-all complete days in the Tuya database.
-
-The process is:
-
-1. Read the measured monthly electricity totals from `monthly-usage.csv`.
-2. Use a linear regression to estimate missing months.
-3. Calculate the average daily household, geyser and non-geyser consumption
-   from all complete days in `daily_load_summary`.
-4. For every day of the year, scale those daily averages up or down according
-   to the applicable month's total.
-5. Apply the same monthly scaling factor to the total, geyser and non-geyser
-   components.
-6. Verify that the projected daily values for each month add up to that
-   month's target total.
-7. Store the resulting daily projection in SQLite.
-
-The projection is therefore seasonal: October, for example, uses the October
-monthly total as its target, while the measured daily average supplies the
-household load shape and geyser/non-geyser split.
-
-The database table created by the script is:
-
-```sql
-daily_load_projection
-```
-
-Fields:
-
-```text
-projection_date
-month
-day
-scaling_factor
-total_energy_kwh
-geyser_energy_kwh
-non_geyser_energy_kwh
-```
-
-The projection table is separate from the measured-data tables. Running the
-projection script does not modify the original Tuya measurements or the
-`daily_load_summary` table.
-
-The script prints every seventh projected day for checking and also prints a
-monthly target-versus-projected verification.
-
----
-
-# 8. Solar / battery simulation
+# 7. Solar / battery simulation
 
 Main simulator:
 
@@ -308,7 +251,7 @@ a physical hot-water tank / thermostat model.
 
 ---
 
-# 9. Multi-day stress testing
+# 8. Multi-day stress testing
 
 The simulator supports continuous battery SOC across repeated days.
 
@@ -328,7 +271,7 @@ This is a scenario test, not a weather forecast.
 
 ---
 
-# 10. PVGIS Hermanus simulation
+# 9. PVGIS Hermanus simulation
 
 Script:
 
@@ -362,7 +305,7 @@ load is satisfied and the battery is full.
 
 ---
 
-# 11. 2023 PVGIS result — current reference
+# 10. 2023 PVGIS result — current reference
 
 Using the current measured 29 September load profile repeated throughout
 2023:
@@ -384,7 +327,7 @@ energy availability.
 
 ---
 
-# 12. Winter result
+# 11. Winter result
 
 The 2023 simulation identified June as the most difficult period.
 
@@ -414,13 +357,12 @@ than a single poor day.
 
 ---
 
-# 13. Battery sensitivity test
+# 12. Battery sensitivity test
 
 Script:
 
 ```text
 solar battery sensitivity.py
-solar_outage_simulation_updated.py
 ```
 
 This compares different battery sizes while keeping the PVGIS weather,
@@ -444,131 +386,7 @@ This is NOT yet a final sizing decision.
 
 ---
 
----
-
-# 14. Grid-outage resilience simulation
-
-Script:
-
-```text
-solar_outage_simulation.py
-```
-
-The outage simulation uses the historical 2023 PVGIS hourly production profile
-together with the current seasonal daily load projection. It tests every
-possible outage starting date in the PVGIS year for:
-
-- 1-day outages
-- 2-day outages
-- 3-day outages
-
-The primary outage-resilience test starts **every outage with a fully charged
-15 kWh usable battery**. This is intended to answer the practical question:
-
-> What happens if the grid fails unexpectedly while the battery is fully
-> charged?
-
-Current outage configuration:
-
-```text
-PV:                     7.0 kWp
-PV orientation:         3.5 kWp east + 3.5 kWp west
-Inverter reference:     8.0 kW
-Battery:                15.0 kWh usable
-Battery reserve:        20% / 3.0 kWh
-Starting SOC:            15.0 kWh
-PV data:                 PVGIS historical 2023
-Load model:              daily_load_projection
-```
-
-During an outage the dispatch priority is:
-
-```text
-PV → house load → battery
-                     ↓
-              surplus PV only
-                     ↓
-                  geyser
-```
-
-The geyser is deliberately treated as a discretionary load during an outage.
-It may only use surplus PV **after the battery is completely full**. The
-battery is therefore never deliberately discharged to heat the geyser.
-
-The simulation records:
-
-- starting, minimum and ending battery SOC
-- PV generation
-- non-geyser house load
-- unserved house load
-- geyser energy required
-- geyser energy actually heated
-- battery discharge
-- curtailed PV
-- whether the battery reserve was reached
-
-## Current full-battery outage results
-
-Using the current load projection and 2023 PVGIS weather:
-
-| Outage | Worst period | Minimum SOC | Unserved house load |
-|---|---|---:|---:|
-| 1 day | 27 Jun 2023 | 7.74 kWh | 0.00 kWh |
-| 2 days | 13–14 Jun 2023 | 5.08 kWh | 0.00 kWh |
-| 3 days | 25–27 Jun 2023 | 3.00 kWh | 1.26 kWh |
-
-The worst 1-day case generated only 2.29 kWh of PV against a 9.15 kWh
-non-geyser house load, yet the full battery still supplied the complete house
-load and ended at 7.74 kWh.
-
-The worst 2-day case generated 9.03 kWh against 18.30 kWh of non-geyser house
-load. The battery ended at 5.08 kWh and there was no unserved house load.
-
-The worst 3-day case was 25–27 June:
-
-```text
-Starting SOC:          15.00 kWh
-PV generation:         15.18 kWh
-House load:             27.45 kWh
-Battery discharge:      14.97 kWh
-Minimum / ending SOC:    3.00 kWh
-Unserved house load:      1.26 kWh
-Geyser heated:            0.00 kWh
-```
-
-This indicates that, in the current model, a full 15 kWh battery provides
-excellent resilience for one- and two-day grid outages and very nearly
-covers even the worst three-day winter sequence.
-
-A separate stress-test mode is available:
-
-```bash
-python3 solar_outage_simulation.py --start-soc-mode normal
-```
-
-This starts each outage using the SOC reached by the preceding normal
-grid-connected simulation. It represents the different scenario where the
-grid fails after several poor-solar days have already depleted the battery.
-It should not be confused with the primary full-battery outage-resilience
-test.
-
-The complete outage-window results are written to:
-
-```text
-solar report/outage simulation/
-```
-
-Important interpretation:
-
-The outage simulation's "house load" excludes the geyser, because the geyser
-is intentionally treated as discretionary during an outage. Oven behaviour is
-also not yet explicitly represented in the measured load model.
-
-The outage simulation is a resilience study, not an engineering certification.
-It uses historical PVGIS weather and the current projected load model.
-
-
-# 14. Current modelling conclusions
+# 13. Current modelling conclusions
 
 The simulations currently indicate:
 
@@ -594,7 +412,7 @@ The simulations currently indicate:
 
 ---
 
-# 15. Next modelling priority
+# 14. Next modelling priority
 
 The next major improvement should NOT be another battery-size test.
 
@@ -610,12 +428,10 @@ Historical PVGIS solar profile
 15 kWh battery
 ```
 
-The current simulation can use the new `daily_load_projection` table as a
-seasonal load model. The projection is based on the average measured daily
-load, scaled to the applicable monthly electricity total.
+The current simulation repeats 29 September's load profile every day.
 
-As the Tuya database accumulates more data, replace this projection baseline
-with actual measured daily/hourly load profiles.
+As the Tuya database accumulates more data, replace that assumption with actual
+measured load profiles.
 
 The improved model should eventually distinguish:
 
@@ -634,7 +450,7 @@ defensible.
 
 ---
 
-# 16. Important modelling caveats
+# 15. Important modelling caveats
 
 The current results should not be treated as an engineering certification
 or a supplier quotation.
@@ -643,8 +459,7 @@ Specific limitations:
 
 - PVGIS is historical modelled solar data, not an on-site solar measurement.
 - The current household profile is based on a very short measurement period.
-- The current annual projection is based on a short measured period and
-  scales the measured daily average to the projected monthly totals.
+- The current simulation repeats one measured day through the year.
 - The geyser is not yet modelled as a thermal tank.
 - Oven behaviour is not yet represented realistically in the load profile.
 - The current model uses simplified battery efficiency and dispatch logic.
@@ -656,7 +471,7 @@ Specific limitations:
 
 ---
 
-# 17. Practical working sequence
+# 16. Practical working sequence
 
 The recommended sequence from here is:
 
@@ -677,20 +492,16 @@ The recommended sequence from here is:
         ↓
 8. Examine winter sequences
         ↓
-9. Test 1 / 2 / 3-day grid-outage resilience
+9. Examine inverter peak-load requirements
         ↓
-10. Examine inverter peak-load requirements
+10. Model geyser control more realistically
         ↓
-11. Model geyser control more realistically
-        ↓
-12. Model oven behaviour during outages
-        ↓
-13. Compare supplier proposals against the resulting requirements
+11. Compare supplier proposals against the resulting requirements
 ```
 
 ---
 
-# 18. Files currently associated with the project
+# 17. Files currently associated with the project
 
 Core scripts:
 
@@ -698,7 +509,6 @@ Core scripts:
 tuya_power_extractor.py
 solar_analysis.py
 solar_report.py
-solar_usage_projection.py
 solar_battery_simulation.py
 solar_pvgis_simulation.py
 solar battery sensitivity.py
@@ -723,3 +533,20 @@ solar report/pvgis/pvgis cache/
 ```
 
 ---
+
+# 18. Python / macOS note
+
+The current Mac Python installation produces this warning:
+
+```text
+NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+,
+currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'
+```
+
+This warning does not currently prevent the Tuya or PVGIS scripts from working.
+
+A future cleanup step is to install a current Homebrew Python with a modern
+OpenSSL implementation and move the project to a dedicated virtual
+environment.
+
+That should be done after the current data/model workflow is stable.
