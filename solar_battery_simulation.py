@@ -32,36 +32,73 @@ from matplotlib.path import Path as MplPath
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-def load_db_path():
+def load_config():
     config_path = SCRIPT_DIR / "config.ini"
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     config = configparser.ConfigParser()
     config.read(config_path)
+    return config
+
+
+def load_db_path(config):
     db_path = Path(config.get("database", "path"))
     if not db_path.is_absolute():
         db_path = SCRIPT_DIR / db_path
     return db_path
 
 
-def args():
-    p = argparse.ArgumentParser(description="Simulate measured household load against east/west PV and battery.")
-    p.add_argument("--pv", type=float, default=7.0)
-    p.add_argument("--east", type=float, default=3.5)
-    p.add_argument("--west", type=float, default=3.5)
-    p.add_argument("--inverter", type=float, default=8.0)
-    p.add_argument("--battery", type=float, default=15.0)
-    p.add_argument("--reserve", type=float, default=20.0)
-    p.add_argument("--initial-soc", type=float, default=None,
-                    help="Starting battery SOC in kWh. Default: full battery.")
+def load_solar_defaults(config):
+    section = "solar"
+    required = [
+        "pv_total_kwp",
+        "pv_east_kwp",
+        "pv_west_kwp",
+        "inverter_kw",
+        "battery_usable_kwh",
+        "battery_reserve_percent",
+        "initial_battery_soc_kwh",
+    ]
+    missing = [key for key in required if not config.has_option(section, key)]
+    if missing:
+        raise configparser.Error(
+            f"Missing required [{section}] setting(s): {', '.join(missing)}"
+        )
+
+    return {
+        "pv": config.getfloat(section, "pv_total_kwp"),
+        "east": config.getfloat(section, "pv_east_kwp"),
+        "west": config.getfloat(section, "pv_west_kwp"),
+        "inverter": config.getfloat(section, "inverter_kw"),
+        "battery": config.getfloat(section, "battery_usable_kwh"),
+        "reserve": config.getfloat(section, "battery_reserve_percent"),
+        "initial_soc": config.getfloat(section, "initial_battery_soc_kwh"),
+    }
+
+
+def args(config):
+    defaults = load_solar_defaults(config)
+    p = argparse.ArgumentParser(
+        description="Simulate measured household load against east/west PV and battery."
+    )
+    p.add_argument("--pv", type=float, default=defaults["pv"])
+    p.add_argument("--east", type=float, default=defaults["east"])
+    p.add_argument("--west", type=float, default=defaults["west"])
+    p.add_argument("--inverter", type=float, default=defaults["inverter"])
+    p.add_argument("--battery", type=float, default=defaults["battery"])
+    p.add_argument("--reserve", type=float, default=defaults["reserve"])
+    p.add_argument(
+        "--initial-soc", type=float, default=defaults["initial_soc"],
+        help="Starting battery SOC in kWh. Default: value from [solar] initial_battery_soc_kwh."
+    )
     p.add_argument("--pv-yield", type=float, default=4.5,
-                    help="Clear-sky daily PV yield in kWh/kWp/day.")
+                   help="Clear-sky daily PV yield in kWh/kWp/day.")
     p.add_argument("--pv-yields", type=str, default=None,
-                    help="Optional comma-separated daily PV yields, one per simulated day. "
-                         "The final value is repeated if fewer values are supplied.")
+                   help="Optional comma-separated daily PV yields, one per simulated day. "
+                        "The final value is repeated if fewer values are supplied.")
     p.add_argument("--repeat-days", type=int, default=1,
-                    help="Repeat the selected measured load profile for this many consecutive simulated days. "
-                         "Useful for multi-day weather/SOC scenarios when only one complete measured day is available.")
+                   help="Repeat the selected measured load profile for this many consecutive simulated days. "
+                        "Useful for multi-day weather/SOC scenarios when only one complete measured day is available.")
     p.add_argument("--geyser-mode", choices=["measured", "solar-shift"], default="solar-shift")
     p.add_argument("--geyser-start", type=float, default=9.0)
     p.add_argument("--geyser-end", type=float, default=16.0)
@@ -666,7 +703,8 @@ def make_sankey_chart(out_dir, summary, inverter_kw, battery_kwh, reserve_pct,
     return path, csv_path
 
 def main():
-    a = args()
+    config = load_config()
+    a = args(config)
     if abs((a.east + a.west) - a.pv) > 0.001:
         raise SystemExit(f"PV mismatch: east ({a.east}) + west ({a.west}) must equal total PV ({a.pv})")
     if a.reserve < 0 or a.reserve >= 100:
@@ -690,7 +728,7 @@ def main():
     else:
         pv_yields = [a.pv_yield]
 
-    db_path = load_db_path()
+    db_path = load_db_path(config)
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}")
     out_dir = SCRIPT_DIR / "solar report"

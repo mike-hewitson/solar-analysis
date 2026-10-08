@@ -8,12 +8,15 @@ Downloads one historical year of hourly PVGIS production for:
 
 Then combines that PV profile with the daily household-load projection
 stored in solar_meter.db. The projection is mapped by month/day onto the
-selected PVGIS year, while the measured complete day's hourly load shape is
-retained.
+selected PVGIS year.
 
-The measured geyser energy is preserved each day and shifted into the
-09:00-16:00 solar window, prioritising hours with PV surplus after
-non-geyser household demand. Remaining geyser energy is placed within
+The intraday non-geyser load shape comes from the database's
+hourly_load_profile table, which is calculated as the average of all
+complete measured days by solar_analysis.py. That average shape is normalised
+to 100% and applied to each projected day's non-geyser energy.
+
+The projected daily geyser energy is then shifted into the 09:00-16:00 solar
+window, prioritising hours with PV surplus after non-geyser household demand. Remaining geyser energy is placed within
 the same window at up to the configured maximum geyser power.
 
 This is an energy model, not a thermal tank/thermostat model.
@@ -24,6 +27,7 @@ No pandas or other third-party package is required.
 
 import argparse
 import calendar
+import configparser
 import csv
 import json
 import math
@@ -44,20 +48,56 @@ LAT = -34.42
 LON = 19.24
 TZ = ZoneInfo("Africa/Johannesburg")
 
-EAST_KWP = 3.5
-WEST_KWP = 3.5
 TILT = 22
 LOSS_PCT = 14
 PVTECH = "crystSi"
-
-INVERTER_KW = 8.0
-BATTERY_KWH = 15.0
-RESERVE_FRAC = 0.20
 BATTERY_EFF = 0.95
 
 GEYSER_START = 9
 GEYSER_END = 16       # exclusive
 GEYSER_MAX_KW = 3.0
+
+
+def load_config():
+    config = configparser.ConfigParser()
+    config_path = Path(__file__).resolve().parent / "config.ini"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"config.ini not found: {config_path}"
+        )
+    config.read(config_path)
+    return config
+
+
+def load_solar_defaults(config):
+    required = (
+        "pv_east_kwp",
+        "pv_west_kwp",
+        "inverter_kw",
+        "battery_usable_kwh",
+        "battery_reserve_percent",
+    )
+    missing = [key for key in required if not config.has_option("solar", key)]
+    if missing:
+        raise KeyError(
+            "Missing [solar] setting(s) in config.ini: " + ", ".join(missing)
+        )
+
+    return {
+        "east_kwp": config.getfloat("solar", "pv_east_kwp"),
+        "west_kwp": config.getfloat("solar", "pv_west_kwp"),
+        "inverter_kw": config.getfloat("solar", "inverter_kw"),
+        "battery_kwh": config.getfloat("solar", "battery_usable_kwh"),
+        "reserve_frac": config.getfloat("solar", "battery_reserve_percent") / 100.0,
+    }
+
+
+def load_db_path(config):
+    db_path = config.get("database", "path", fallback="solar_meter.db")
+    path = Path(db_path).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    return path
 
 # Household load is supplied by the daily_load_projection table created
 # by solar_usage_projection.py. The PVGIS simulation maps the projection's
@@ -65,20 +105,20 @@ GEYSER_MAX_KW = 3.0
 PROJECTION_TABLE = "daily_load_projection"
 
 
-def parse_args():
+def parse_args(solar_defaults):
     p = argparse.ArgumentParser()
     p.add_argument("--year", type=int, default=2023,
                    help="Historical PVGIS year to simulate (default 2023)")
-    p.add_argument("--db", default="solar_meter.db",
+    p.add_argument("--db", default=None,
                    help="SQLite database path")
     p.add_argument("--pv-cache", default=None,
                    help="Optional directory for cached PVGIS JSON files")
     p.add_argument("--output-dir", default="solar report/pvgis",
                    help="Output directory")
-    p.add_argument("--battery-kwh", type=float, default=BATTERY_KWH)
-    p.add_argument("--reserve", type=float, default=RESERVE_FRAC,
+    p.add_argument("--battery-kwh", type=float, default=solar_defaults["battery_kwh"])
+    p.add_argument("--reserve", type=float, default=solar_defaults["reserve_frac"],
                    help="Battery reserve fraction, e.g. 0.20")
-    p.add_argument("--inverter-kw", type=float, default=INVERTER_KW)
+    p.add_argument("--inverter-kw", type=float, default=solar_defaults["inverter_kw"])
     p.add_argument("--geyser-start", type=int, default=GEYSER_START)
     p.add_argument("--geyser-end", type=int, default=GEYSER_END)
     p.add_argument("--geyser-max-kw", type=float, default=GEYSER_MAX_KW)
@@ -148,98 +188,60 @@ def pvgis_hourly(data):
     return out
 
 
-def load_complete_measured_day(db_path):
+def load_hourly_shape(db_path):
+    """Load the average complete-day non-geyser shape from the database.
+
+    solar_analysis.py creates hourly_load_profile from all complete measured
+    days. The non_geyser_fraction column is the normalised average hourly
+    non-geyser energy and therefore defines the intraday shape only; the
+    daily_load_projection table remains authoritative for daily energy.
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT hour,
+                   complete_days,
+                   avg_non_geyser_energy_kwh,
+                   non_geyser_fraction
+            FROM hourly_load_profile
+            ORDER BY hour
+        """).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "hourly_load_profile is missing or outdated. "
+            "Run solar_analysis.py first to rebuild the database analysis tables."
+        ) from exc
+    finally:
+        conn.close()
 
-    rows = conn.execute("""
-        SELECT timestamp_sast, reading_date, power_a_w, power_b_w
-        FROM meter_readings
-        ORDER BY timestamp_sast
-    """).fetchall()
-    conn.close()
+    if len(rows) != 24:
+        raise RuntimeError(
+            f"Expected 24 hourly load-shape rows, found {len(rows)}."
+        )
 
-    by_date = defaultdict(list)
-    for r in rows:
-        by_date[r["reading_date"]].append(r)
+    complete_days = min(int(r["complete_days"]) for r in rows)
+    if complete_days <= 0:
+        raise RuntimeError("No complete measured days are available for the intraday load shape.")
 
-    candidates = []
-    for d, rs in by_date.items():
-        if len(rs) < 1000:
-            continue
-        first = datetime.fromisoformat(rs[0]["timestamp_sast"])
-        last = datetime.fromisoformat(rs[-1]["timestamp_sast"])
-        if first.time() <= datetime.strptime("00:05", "%H:%M").time() and \
-           last.time() >= datetime.strptime("23:55", "%H:%M").time():
-            candidates.append((d, rs))
+    fractions = {int(r["hour"]): max(0.0, float(r["non_geyser_fraction"] or 0.0))
+                 for r in rows}
+    fraction_sum = sum(fractions.values())
 
-    if not candidates:
-        raise RuntimeError("No complete measured day was found in meter_readings.")
+    if fraction_sum <= 0:
+        raise RuntimeError("The database contains no usable non-geyser hourly load shape.")
 
-    date_str, rs = sorted(candidates, key=lambda x: x[0])[-1]
-    threshold = 20.0
-
-    # Build hourly energy by splitting each valid trapezoidal interval at hour boundaries.
-    hourly_total = defaultdict(float)
-    hourly_geyser = defaultdict(float)
-
-    parsed = []
-    for r in rs:
-        ts = datetime.fromisoformat(r["timestamp_sast"])
-        a = float(r["power_a_w"] or 0.0)
-        b = float(r["power_b_w"] or 0.0)
-        b = max(0.0, b)
-        if b < threshold:
-            b = 0.0
-        a = max(0.0, a)
-        parsed.append((ts, a, b))
-
-    for i in range(len(parsed) - 1):
-        t0, a0, b0 = parsed[i]
-        t1, a1, b1 = parsed[i + 1]
-        dt = (t1 - t0).total_seconds()
-        if dt <= 0 or dt > 300:
-            continue
-
-        # Linear/trapezoidal integration, split over hour boundaries.
-        cur = t0
-        while cur < t1:
-            hour_start = cur.replace(minute=0, second=0, microsecond=0)
-            hour_end = hour_start + timedelta(hours=1)
-            seg_end = min(t1, hour_end)
-            f0 = (cur - t0).total_seconds() / dt
-            f1 = (seg_end - t0).total_seconds() / dt
-
-            aa0 = a0 + (a1 - a0) * f0
-            aa1 = a0 + (a1 - a0) * f1
-            bb0 = b0 + (b1 - b0) * f0
-            bb1 = b0 + (b1 - b0) * f1
-
-            seg_hours = (seg_end - cur).total_seconds() / 3600.0
-            total_kwh = ((aa0 + aa1) / 2.0) / 1000.0 * seg_hours
-            geyser_kwh = ((bb0 + bb1) / 2.0) / 1000.0 * seg_hours
-
-            h = hour_start.hour
-            hourly_total[h] += total_kwh
-            hourly_geyser[h] += geyser_kwh
-            cur = seg_end
-
-    hourly_non_geyser = {
-        h: max(0.0, hourly_total[h] - hourly_geyser[h])
-        for h in range(24)
-    }
-
-    total = sum(hourly_total.values())
-    geyser = sum(hourly_geyser.values())
+    # Re-normalise defensively so rounding in the stored values cannot change
+    # the projected daily energy.
+    fractions = {h: value / fraction_sum for h, value in fractions.items()}
 
     return {
-        "date": date_str,
-        "hourly_total": dict(hourly_total),
-        "hourly_geyser": dict(hourly_geyser),
-        "hourly_non_geyser": hourly_non_geyser,
-        "total_kwh": total,
-        "geyser_kwh": geyser,
-        "non_geyser_kwh": sum(hourly_non_geyser.values()),
+        "complete_days": complete_days,
+        "non_geyser_fraction": fractions,
+        "average_non_geyser_kwh": sum(
+            max(0.0, float(r["avg_non_geyser_energy_kwh"] or 0.0))
+            for r in rows
+        ),
     }
 
 
@@ -331,7 +333,7 @@ def load_daily_projection(db_path):
     return projection
 
 
-def simulate_year(pv_by_local_hour, load_profile, daily_projection, args, year):
+def simulate_year(pv_by_local_hour, hourly_shape, daily_projection, args, year):
     start_soc = args.battery_kwh
     reserve_kwh = args.battery_kwh * args.reserve
 
@@ -354,24 +356,14 @@ def simulate_year(pv_by_local_hour, load_profile, daily_projection, args, year):
     for day in dates:
         pv = {h: pv_by_local_hour.get((day, h), 0.0) for h in range(24)}
 
-        # Use the projected energy for this month/day. Retain the measured
-        # complete-day hourly shape, but scale the non-geyser and geyser
-        # components independently to their projected daily energies.
+        # The daily projection is the authoritative source of daily energy.
+        # The database average profile is used only as a normalised intraday shape for
+        # distributing projected non-geyser energy across the hours.
         projected = daily_projection[(day.month, day.day)]
 
-        if load_profile["non_geyser_kwh"] <= 0:
-            raise RuntimeError(
-                "Measured non-geyser daily energy is zero; "
-                "cannot scale the hourly profile."
-            )
-
-        non_geyser_scale = (
-            projected["non_geyser_kwh"] /
-            load_profile["non_geyser_kwh"]
-        )
         non_geyser = {
-            h: v * non_geyser_scale
-            for h, v in load_profile["hourly_non_geyser"].items()
+            h: fraction * projected["non_geyser_kwh"]
+            for h, fraction in hourly_shape["non_geyser_fraction"].items()
         }
         geyser = projected["geyser_kwh"]
 
@@ -385,6 +377,15 @@ def simulate_year(pv_by_local_hour, load_profile, daily_projection, args, year):
         day_pv = sum(pv.values())
         day_load = sum(total_load.values())
         day_geyser = sum(geyser_sched.values())
+
+        # The simulated daily household energy must exactly equal the
+        # database projection for this calendar day.
+        if abs(day_load - projected["total_kwh"]) > 1e-6:
+            raise RuntimeError(
+                f"Daily load reconciliation failed for {day}: "
+                f"simulated={day_load:.6f} kWh, "
+                f"projected={projected['total_kwh']:.6f} kWh"
+            )
 
         pv_direct = 0.0
         pv_to_geyser = 0.0
@@ -748,8 +749,10 @@ def write_csv(path, rows, fieldnames):
 
 
 def main():
-    args = parse_args()
-    db = Path(args.db).expanduser()
+    config = load_config()
+    solar_defaults = load_solar_defaults(config)
+    args = parse_args(solar_defaults)
+    db = Path(args.db).expanduser() if args.db else load_db_path(config)
     out = Path(args.output_dir).expanduser()
     cache = Path(args.pv_cache).expanduser() if args.pv_cache else out / "pvgis cache"
     out.mkdir(parents=True, exist_ok=True)
@@ -760,7 +763,8 @@ def main():
     print("=" * 52)
     print(f"PVGIS year:                 {args.year}")
     print(f"Location:                   {LAT:.4f}, {LON:.4f}")
-    print(f"PV:                         7.00 kWp (3.5 east + 3.5 west)")
+    print(f"PV:                         {solar_defaults['east_kwp'] + solar_defaults['west_kwp']:.2f} kWp "
+          f"({solar_defaults['east_kwp']:.2f} east + {solar_defaults['west_kwp']:.2f} west)")
     print(f"Roof tilt:                  {TILT}°")
     print(f"PVGIS system losses:        {LOSS_PCT}%")
     print(f"Inverter:                   {args.inverter_kw:.2f} kW")
@@ -770,10 +774,10 @@ def main():
     print("Monthly household-demand model:")
 
     east_data, east_path, east_cached = fetch_pvgis(
-        EAST_KWP, -90, args.year, cache, args.no_download
+        solar_defaults["east_kwp"], -90, args.year, cache, args.no_download
     )
     west_data, west_path, west_cached = fetch_pvgis(
-        WEST_KWP, 90, args.year, cache, args.no_download
+        solar_defaults["west_kwp"], 90, args.year, cache, args.no_download
     )
 
     east = pvgis_hourly(east_data)
@@ -783,20 +787,22 @@ def main():
     for ts, p in east.items():
         pv_by_local_hour[(ts.date(), ts.hour)] = p + west.get(ts, 0.0)
 
-    load_profile = load_complete_measured_day(db)
+    # Daily energy comes from the database projection. The intraday
+    # non-geyser shape comes from the average of all complete measured days
+    # stored in hourly_load_profile by solar_analysis.py.
+    hourly_shape = load_hourly_shape(db)
     daily_projection = load_daily_projection(db)
 
-    print(f"Measured load day:          {load_profile['date']}")
-    print(f"Measured daily load:        {load_profile['total_kwh']:.3f} kWh")
-    print(f"Measured geyser:            {load_profile['geyser_kwh']:.3f} kWh")
-    print(f"Measured non-geyser:        {load_profile['non_geyser_kwh']:.3f} kWh")
-    print(f"Projection table:           {PROJECTION_TABLE}")
+    print(f"Daily load source:          {PROJECTION_TABLE}")
     print(f"Projection days available:  {len(daily_projection)}")
+    print("Intraday load shape:        average of complete measured days")
+    print(f"Complete days in shape:     {hourly_shape['complete_days']}")
+    print(f"Average non-geyser load:    {hourly_shape['average_non_geyser_kwh']:.3f} kWh/day")
+    print("  (shape only; daily energy comes from the projection)")
     print()
 
-
     daily, annual, monthly, min_soc, max_soc = simulate_year(
-        pv_by_local_hour, load_profile, daily_projection, args, args.year
+        pv_by_local_hour, hourly_shape, daily_projection, args, args.year
     )
 
     daily_fields = list(daily[0].keys())
@@ -849,7 +855,7 @@ def main():
     print(f"PV curtailed:               {annual['curtailed']:.1f} kWh")
     print(f"Minimum battery SOC:        {min_soc:.2f} kWh")
     print(f"Maximum battery SOC:        {max_soc:.2f} kWh")
-    print(f"Peak measured load remains: 6.203 kW reference from current dataset")
+    print(f"Peak simulated load:         {max(x["peak_load_kw"] for x in daily):.3f} kW")
     print()
 
     # Identify the most stressful consecutive 14-day periods by grid import.

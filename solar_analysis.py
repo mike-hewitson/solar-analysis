@@ -170,7 +170,8 @@ def create_schema(con, noise_threshold):
         avg_non_geyser_power_w REAL,
         avg_total_energy_kwh REAL,
         avg_geyser_energy_kwh REAL,
-        avg_non_geyser_energy_kwh REAL
+        avg_non_geyser_energy_kwh REAL,
+        non_geyser_fraction REAL
     )
     """)
 
@@ -247,7 +248,8 @@ def populate_hourly(con):
         avg_non_geyser_power_w,
         avg_total_energy_kwh,
         avg_geyser_energy_kwh,
-        avg_non_geyser_energy_kwh
+        avg_non_geyser_energy_kwh,
+        non_geyser_fraction
     )
     WITH hourly_daily AS (
         SELECT
@@ -277,7 +279,19 @@ def populate_hourly(con):
         AVG(non_geyser_power_w),
         AVG(total_energy_kwh),
         AVG(geyser_energy_kwh),
-        AVG(non_geyser_energy_kwh)
+        AVG(non_geyser_energy_kwh),
+        AVG(non_geyser_energy_kwh) /
+            NULLIF(
+                (
+                    SELECT SUM(avg_non_geyser_energy_kwh)
+                    FROM (
+                        SELECT AVG(non_geyser_energy_kwh) AS avg_non_geyser_energy_kwh
+                        FROM hourly_daily
+                        GROUP BY hour
+                    )
+                ),
+                0.0
+            ) AS non_geyser_fraction
     FROM hourly_daily
     GROUP BY hour
     ORDER BY hour
@@ -316,13 +330,14 @@ def print_summary(con, threshold):
     print(
         f"{'Hour':>5} {'Days':>6} {'Total W':>12} "
         f"{'Geyser W':>12} {'Non-geyser W':>15} "
-        f"{'Total kWh':>12} {'Non-geyser kWh':>16}"
+        f"{'Total kWh':>12} {'Non-geyser kWh':>16} {'NG frac':>10}"
     )
 
     for row in con.execute("""
         SELECT hour, complete_days, avg_total_power_w,
                avg_geyser_power_w, avg_non_geyser_power_w,
-               avg_total_energy_kwh, avg_non_geyser_energy_kwh
+               avg_total_energy_kwh, avg_non_geyser_energy_kwh,
+               non_geyser_fraction
         FROM hourly_load_profile
         ORDER BY hour
     """):

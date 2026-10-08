@@ -14,8 +14,6 @@ its cached PVGIS files / solar_meter.db.
 
 import argparse
 import csv
-import subprocess
-import sys
 from pathlib import Path
 
 
@@ -29,9 +27,9 @@ def args():
     return p.parse_args()
 
 
-def run_case(base_script, year, battery, root):
-    # Import the existing simulation as a module so the sensitivity test
-    # uses exactly the same PVGIS and load model.
+def run_case(base_script, year, battery, root, solar_defaults, db_path, pv_cache):
+    # Import the centralised PVGIS simulation so the sensitivity test uses
+    # exactly the same PVGIS, load projection and energy-flow model.
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("solar_pvgis_simulation", base_script)
@@ -40,24 +38,23 @@ def run_case(base_script, year, battery, root):
 
     a = argparse.Namespace(
         year=year,
-        db=str(root / "solar_meter.db"),
-        pv_cache=str(root / "solar report/pvgis/pvgis cache"),
+        db=str(db_path),
+        pv_cache=str(pv_cache),
         output_dir=str(root / "solar report/battery sensitivity"),
         battery_kwh=battery,
-        reserve=0.20,
-        inverter_kw=8.0,
-        geyser_start=9,
-        geyser_end=16,
-        geyser_max_kw=3.0,
-        annual_target_kwh=mod.ANNUAL_PLANNING_KWH,
-        missing_month_kwh=None,
-        no_download=False,
+        reserve=solar_defaults["reserve_frac"],
+        inverter_kw=solar_defaults["inverter_kw"],
+        geyser_start=mod.GEYSER_START,
+        geyser_end=mod.GEYSER_END,
+        geyser_max_kw=mod.GEYSER_MAX_KW,
     )
 
-    east_data, _, _ = mod.fetch_pvgis(mod.EAST_KWP, -90, year,
-                                       Path(a.pv_cache), False)
-    west_data, _, _ = mod.fetch_pvgis(mod.WEST_KWP, 90, year,
-                                       Path(a.pv_cache), False)
+    east_data, _, _ = mod.fetch_pvgis(
+        solar_defaults["east_kwp"], -90, year, pv_cache, False
+    )
+    west_data, _, _ = mod.fetch_pvgis(
+        solar_defaults["west_kwp"], 90, year, pv_cache, False
+    )
 
     east = mod.pvgis_hourly(east_data)
     west = mod.pvgis_hourly(west_data)
@@ -66,10 +63,10 @@ def run_case(base_script, year, battery, root):
     for ts, p in east.items():
         pv[(ts.date(), ts.hour)] = p + west.get(ts, 0.0)
 
-    load = mod.load_complete_measured_day(Path(a.db))
-    monthly_targets, _ = mod.build_monthly_targets(a)
+    load = mod.load_complete_measured_day(db_path)
+    daily_projection = mod.load_daily_projection(db_path)
     daily, annual, monthly, min_soc, max_soc = mod.simulate_year(
-        pv, load, a, year, monthly_targets
+        pv, load, daily_projection, a, year
     )
 
     june = monthly[6]
@@ -77,7 +74,7 @@ def run_case(base_script, year, battery, root):
     if len(daily) >= 14:
         windows = []
         for i in range(len(daily) - 13):
-            chunk = daily[i:i+14]
+            chunk = daily[i:i + 14]
             windows.append({
                 "grid": sum(x["grid_kwh"] for x in chunk),
                 "pv": sum(x["pv_kwh"] for x in chunk),
@@ -108,27 +105,47 @@ def run_case(base_script, year, battery, root):
         "worst_14d_min_soc_kwh": worst_window["min_soc"] if worst_window else None,
     }
 
-
 def main():
     a = args()
-    root = Path(a.script).expanduser().resolve().parent
+    script_path = Path(a.script).expanduser().resolve()
+    root = script_path.parent
+
+    # Use the same centralised config.ini as solar_pvgis_simulation.py.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("solar_pvgis_simulation", script_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    config = mod.load_config()
+    solar_defaults = mod.load_solar_defaults(config)
+    db_path = mod.load_db_path(config)
+    pv_cache = root / "solar report/pvgis/pvgis cache"
+
     batteries = [float(x.strip()) for x in a.batteries.split(",") if x.strip()]
+    if not batteries or any(b <= 0 for b in batteries):
+        raise SystemExit("--batteries must contain positive battery sizes.")
     out = Path(a.output_dir).expanduser()
+    if not out.is_absolute():
+        out = root / out
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
     print("Battery-size sensitivity — Hermanus PVGIS 2023")
     print("=" * 66)
-    print(f"PV:             7.00 kWp east/west")
-    print(f"Inverter:       8.00 kW")
-    print(f"Reserve:        20%")
+    pv_total = solar_defaults["east_kwp"] + solar_defaults["west_kwp"]
+    print(f"PV:             {pv_total:.2f} kWp "
+          f"({solar_defaults['east_kwp']:.2f} east + {solar_defaults['west_kwp']:.2f} west)")
+    print(f"Inverter:       {solar_defaults['inverter_kw']:.2f} kW")
+    print(f"Reserve:        {solar_defaults['reserve_frac'] * 100:.1f}%")
+    print(f"Database:       {db_path}")
+    print(f"PV cache:       {pv_cache}")
     print(f"Battery cases:  {', '.join(f'{x:g}' for x in batteries)} kWh")
     print()
 
     results = []
     for b in batteries:
         print(f"Running {b:g} kWh battery...")
-        r = run_case(a.script, a.year, b, root)
+        r = run_case(script_path, a.year, b, root, solar_defaults, db_path, pv_cache)
         results.append(r)
 
     fields = list(results[0].keys())
