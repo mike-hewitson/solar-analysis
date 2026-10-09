@@ -328,9 +328,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract one complete SAST day from Tuya into solar_meter.db."
     )
+    default_date = datetime.now(TZ).date() - timedelta(days=1)
     parser.add_argument(
-        "--date", required=True, type=parse_date,
-        help="Complete SAST day, e.g. 2026-09-29",
+        "--date", type=parse_date, default=default_date,
+        help=(
+            "Complete SAST day, e.g. 2026-09-29 "
+            f"(default: yesterday, {default_date:%Y-%m-%d})"
+        ),
     )
     parser.add_argument(
         "--output-csv",

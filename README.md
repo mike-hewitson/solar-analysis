@@ -54,12 +54,25 @@ configured threshold.
 
 The extraction script retrieves Tuya report-log data using the Tuya Cloud API.
 
-Typical command:
+Typical commands:
 
 ```bash
 cd ~/Documents/Solar
+
+# Extract yesterday's complete day in South African local time (default)
+python3 tuya_power_extractor.py
+
+# Extract a specific complete day
 python3 tuya_power_extractor.py --date 2026-09-29
+
+# Extract yesterday and also write a CSV copy
+python3 tuya_power_extractor.py --output-csv yesterday.csv
 ```
+
+If `--date` is omitted, the extractor calculates yesterday's date at runtime
+using the `Africa/Johannesburg` timezone. Supplying `--date YYYY-MM-DD`
+continues to extract that explicit day. The selected date is printed before
+the extraction starts.
 
 The script uses short API windows, pagination and rate-limit handling.
 
@@ -143,8 +156,12 @@ The measured geyser consumption is currently a very large proportion of daily
 energy. This should NOT yet be treated as a representative annual average,
 because the database contains only a short period of observations.
 
-As more days accumulate, the solar model should use the actual measured load
-rather than repeating 29 September.
+The modelling workflow no longer repeats one measured day through the year.
+Daily household, geyser and non-geyser energy are supplied by the
+`daily_load_projection` table, while the intraday non-geyser shape is derived
+from the average of all complete measured days in the database. As more
+complete days accumulate, that average shape will automatically become more
+representative when `solar_analysis.py` is rerun.
 
 ---
 
@@ -164,7 +181,8 @@ The analysis creates cleaned/derived data including:
 - integrated total energy
 - integrated geyser energy
 - daily summaries
-- hourly load profiles
+- hourly load profiles averaged across all complete calendar days
+- average hourly non-geyser energy profile for simulation use
 
 Geyser cleaning:
 
@@ -300,6 +318,20 @@ solar report/pvgis/pvgis cache/
 The model uses historical hourly solar/weather data rather than an artificial
 clear-sky curve.
 
+Household load is sourced from the SQLite database in two parts:
+
+1. `daily_load_projection` is authoritative for each day's total household,
+   geyser and non-geyser energy.
+2. `hourly_load_profile` supplies the intraday non-geyser shape, calculated as
+   the average of all complete measured days. That shape is normalised and
+   scaled to each projected day's non-geyser energy.
+
+The simulation therefore does not depend on a particular measured day for its
+daily energy or intraday shape.
+
+The projected geyser energy is shifted into the 09:00–16:00 solar window,
+subject to the configured maximum geyser power.
+
 The simulation assumes zero export: surplus PV is curtailed once household
 load is satisfied and the battery is full.
 
@@ -307,8 +339,8 @@ load is satisfied and the battery is full.
 
 # 10. 2023 PVGIS result — current reference
 
-Using the current measured 29 September load profile repeated throughout
-2023:
+Using the current database daily-load projection together with the average
+intraday non-geyser profile derived from all complete measured days:
 
 ```text
 PV generation:          ~9,368 kWh
@@ -408,32 +440,41 @@ The simulations currently indicate:
 6. Intelligent geyser control is therefore potentially important, especially
    during prolonged poor-solar periods.
 
-7. The current load model is the biggest remaining limitation.
+7. The load model is still limited by the amount of measured data available,
+   but it now uses the database's projected daily energy and an average
+   complete-day intraday shape rather than repeating a single measured day.
 
 ---
 
 # 14. Next modelling priority
 
-The next major improvement should NOT be another battery-size test.
-
-Instead:
+The basic measured-load architecture is now in place:
 
 ```text
-Actual measured Tuya load
-        +
-Historical PVGIS solar profile
-        +
-7 kWp east/west PV
-        +
-15 kWh battery
+Tuya measurements
+        ↓
+solar_analysis.py
+        ↓
+SQLite daily summaries + average complete-day hourly profile
+        ↓
+solar_usage_projection.py
+        ↓
+daily_load_projection
+        ↓
+solar_pvgis_simulation.py
+        ↓
+Historical PVGIS solar profile + projected household load
+        ↓
+PV / battery simulation
 ```
 
-The current simulation repeats 29 September's load profile every day.
+The current model uses the database's projected daily energy and the average
+intraday non-geyser shape across all complete measured days. It no longer
+depends on repeating 29 September's load profile.
 
-As the Tuya database accumulates more data, replace that assumption with actual
-measured load profiles.
-
-The improved model should eventually distinguish:
+The next improvements should focus on making the load model more granular and
+representative as more Tuya data becomes available. The model should
+eventually distinguish:
 
 - actual daily load
 - weekday/weekend behaviour
@@ -458,8 +499,9 @@ or a supplier quotation.
 Specific limitations:
 
 - PVGIS is historical modelled solar data, not an on-site solar measurement.
-- The current household profile is based on a very short measurement period.
-- The current simulation repeats one measured day through the year.
+- The current household profile is based on a relatively short measurement period.
+- The intraday non-geyser shape is an average across complete measured days; it
+  does not yet distinguish weekdays from weekends or seasonal behaviour.
 - The geyser is not yet modelled as a thermal tank.
 - Oven behaviour is not yet represented realistically in the load profile.
 - The current model uses simplified battery efficiency and dispatch logic.
@@ -482,9 +524,9 @@ The recommended sequence from here is:
         ↓
 3. Build a larger measured load dataset
         ↓
-4. Generate measured daily/hourly load profiles
+4. Rebuild the daily projection and average complete-day hourly shape
         ↓
-5. Combine measured load with PVGIS hourly weather
+5. Combine projected daily load + average intraday shape with PVGIS weather
         ↓
 6. Model the 7 kWp east/west PV system
         ↓
