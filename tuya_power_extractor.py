@@ -13,6 +13,7 @@ import csv
 import sqlite3
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,13 +30,41 @@ API = "https://openapi.tuyaeu.com"
 PATH = "/v2.1/cloud/thing/{}/report-logs"
 TZ = ZoneInfo("Africa/Johannesburg")
 PAGE_SIZE = 20
-WINDOW_MS = 5 * 60 * 1000
+DEFAULT_WINDOW_MINUTES = 15
+DEFAULT_PAGINATION_DELAY = 0.25
 TIMEOUT = 30
 BASE_DELAY = 1.5
 MAX_DELAY = 30.0
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "config.ini"
+
+# Runtime instrumentation. Timings are printed at the end of each run.
+METRICS = {
+    "api_requests": 0,
+    "api_seconds": 0.0,
+    "api_failures": 0,
+    "rate_limit_retries": 0,
+    "pages": 0,
+    "windows": 0,
+    "window_seconds": 0.0,
+    "parse_seconds": 0.0,
+    "sleep_between_windows_seconds": 0.0,
+    "sleep_pagination_seconds": 0.0,
+    "sleep_rate_limit_seconds": 0.0,
+}
+
+
+
+def tracked_sleep(seconds, category):
+    """Sleep and record elapsed time by reason."""
+    if seconds <= 0:
+        return
+    started = time.perf_counter()
+    time.sleep(seconds)
+    elapsed = time.perf_counter() - started
+    key = f"sleep_{category}_seconds"
+    METRICS[key] = METRICS.get(key, 0.0) + elapsed
 
 
 def load_config():
@@ -106,18 +135,30 @@ def signed_get(api, path, params):
         "t": str(request_time),
     }
 
-    response = requests.get(API + path, params=params, headers=headers, timeout=TIMEOUT)
+    started = time.perf_counter()
+    METRICS["api_requests"] += 1
     try:
-        return response.json()
-    except ValueError:
-        raise RuntimeError(
-            f"Tuya returned HTTP {response.status_code}: {response.text[:500]}"
-        )
+        response = requests.get(API + path, params=params, headers=headers, timeout=TIMEOUT)
+        try:
+            payload = response.json()
+        except ValueError:
+            METRICS["api_failures"] += 1
+            raise RuntimeError(
+                f"Tuya returned non-JSON HTTP {response.status_code}: {response.text[:500]}"
+            )
+        if response.status_code >= 400:
+            METRICS["api_failures"] += 1
+        return payload
+    except requests.RequestException:
+        METRICS["api_failures"] += 1
+        raise
+    finally:
+        METRICS["api_seconds"] += time.perf_counter() - started
 
 
-def fetch_page(api, device_id, code, start_ms, end_ms, last_row_key=None):
+def fetch_page(api, device_id, codes, start_ms, end_ms, last_row_key=None):
     params = {
-        "codes": code,
+        "codes": ",".join(codes),
         "start_time": start_ms,
         "end_time": end_ms,
         "size": PAGE_SIZE,
@@ -127,75 +168,101 @@ def fetch_page(api, device_id, code, start_ms, end_ms, last_row_key=None):
     return signed_get(api, PATH.format(device_id), params)
 
 
-def fetch_window(api, device_id, code, start_ms, end_ms):
-    rows = []
+def fetch_window(api, device_id, codes, start_ms, end_ms, pagination_delay):
+    """Fetch all requested data-point codes in one time window."""
+    rows_by_code = {code: [] for code in codes}
     last_row_key = None
     delay = BASE_DELAY
 
     while True:
         while True:
-            response = fetch_page(api, device_id, code, start_ms, end_ms, last_row_key)
+            response = fetch_page(api, device_id, codes, start_ms, end_ms, last_row_key)
             if response.get("success"):
                 break
 
             if response.get("code") in (40000309, 429):
+                METRICS["rate_limit_retries"] += 1
                 print(f"    Rate limited; waiting {delay:.1f}s...")
-                time.sleep(delay)
+                tracked_sleep(delay, "rate_limit")
                 delay = min(MAX_DELAY, delay * 2)
                 continue
 
-            raise RuntimeError(f"Tuya API error for {code}: {response}")
+            raise RuntimeError(f"Tuya API error for {','.join(codes)}: {response}")
 
+        METRICS["pages"] += 1
         result = response.get("result") or {}
+        parse_started = time.perf_counter()
         for item in result.get("logs") or []:
             try:
-                rows.append({
-                    "event_time_ms": int(item["eventTime"]),
+                code = item.get("code")
+                if code not in rows_by_code:
+                    continue
+                # Tuya documentation uses event_time; retain eventTime compatibility
+                # with responses returned by some versions of the API.
+                event_time = item.get("event_time", item.get("eventTime"))
+                rows_by_code[code].append({
+                    "event_time_ms": int(event_time),
                     "watts": convert_power(code, item["value"]),
                 })
             except (KeyError, TypeError, ValueError):
                 continue
 
-        if not result.get("hasMore"):
+        METRICS["parse_seconds"] += time.perf_counter() - parse_started
+
+        if not result.get("hasMore", result.get("has_more", False)):
             break
 
-        new_key = result.get("lastRowKey")
+        new_key = result.get("lastRowKey", result.get("last_row_key"))
         if not new_key:
-            raise RuntimeError(f"Tuya returned hasMore=true for {code}, but no lastRowKey.")
+            raise RuntimeError(
+                f"Tuya returned hasMore=true for {','.join(codes)}, but no last row key."
+            )
         if new_key == last_row_key:
-            raise RuntimeError(f"Tuya pagination key did not change for {code}.")
+            raise RuntimeError(f"Tuya pagination key did not change for {','.join(codes)}.")
 
         last_row_key = new_key
-        time.sleep(delay)
+        tracked_sleep(pagination_delay, "pagination")
 
-    return rows
+    return rows_by_code
 
 
-def fetch_all(api, device_id, code, start_ms, end_ms):
-    readings = {}
+def fetch_all(api, device_id, codes, start_ms, end_ms, window_minutes, pagination_delay):
+    readings = {code: {} for code in codes}
     cursor = start_ms
     chunk = 0
-    total = (end_ms - start_ms + WINDOW_MS - 1) // WINDOW_MS
+    window_ms = window_minutes * 60 * 1000
+    total = (end_ms - start_ms + window_ms - 1) // window_ms
+    started = time.perf_counter()
 
     while cursor < end_ms:
         chunk += 1
-        chunk_end = min(cursor + WINDOW_MS, end_ms)
+        chunk_end = min(cursor + window_ms, end_ms)
         start_dt = datetime.fromtimestamp(cursor / 1000, TZ)
         end_dt = datetime.fromtimestamp(chunk_end / 1000, TZ)
 
-        print(f"  {code}: chunk {chunk}/{total} "
+        print(f"  Combined channels: chunk {chunk}/{total} "
               f"{start_dt:%Y-%m-%d %H:%M:%S}–{end_dt:%H:%M:%S}")
 
-        rows = fetch_window(api, device_id, code, cursor, chunk_end)
-        for row in rows:
-            readings[row["event_time_ms"]] = row["watts"]
+        window_started = time.perf_counter()
+        rows_by_code = fetch_window(
+            api, device_id, codes, cursor, chunk_end, pagination_delay
+        )
+        METRICS["windows"] += 1
+        METRICS["window_seconds"] += time.perf_counter() - window_started
 
-        print(f"    Retrieved {len(rows)} readings")
+        for code in codes:
+            rows = rows_by_code[code]
+            for row in rows:
+                readings[code][row["event_time_ms"]] = row["watts"]
+            print(f"    {code}: retrieved {len(rows)} readings")
+
         cursor = chunk_end
         if cursor < end_ms:
-            time.sleep(BASE_DELAY)
+            tracked_sleep(BASE_DELAY, "between_windows")
 
-    return sorted(readings.items())
+    elapsed = time.perf_counter() - started
+    print(f"  Combined-channel extraction elapsed: {elapsed:.2f}s")
+    return {code: sorted(values.items()) for code, values in readings.items()}
 
 
 def nearest(times, target, tolerance_ms=2500):
@@ -337,10 +404,28 @@ def main():
         ),
     )
     parser.add_argument(
+        "--window-minutes", type=int, default=DEFAULT_WINDOW_MINUTES,
+        help=(
+            "Window size in minutes (default: 15). Larger windows may require "
+            "more pagination; override with --window-minutes if needed."
+        ),
+    )
+    parser.add_argument(
+        "--pagination-delay", type=float, default=DEFAULT_PAGINATION_DELAY,
+        help=(
+            "Seconds to wait between ordinary pagination pages (default: 0.25). "
+            "Rate-limit backoff remains separate and starts at 1.5 seconds."
+        ),
+    )
+    parser.add_argument(
         "--output-csv",
         help="Optional CSV output path for this extraction.",
     )
     args = parser.parse_args()
+    if args.window_minutes < 1:
+        parser.error("--window-minutes must be at least 1")
+    if args.pagination_delay < 0:
+        parser.error("--pagination-delay must be zero or greater")
 
     try:
         config = load_config()
@@ -360,6 +445,9 @@ def main():
     print(f"End:        {end}")
     print(f"Config:     {CONFIG_FILE}")
     print(f"Database:   {config['db_path']}")
+    print(f"Window:     {args.window_minutes} minute(s)")
+    print(f"Pagination: {args.pagination_delay:.2f}s ordinary delay")
+    print(f"Rate limit: {BASE_DELAY:.2f}s initial backoff, max {MAX_DELAY:.1f}s")
     print("========================================")
 
     connection = connect_database(config["db_path"])
@@ -371,25 +459,25 @@ def main():
 
         start_ms, end_ms = to_ms(start), to_ms(end)
 
-        print(f"\nRequesting power_a for {args.date}...")
-        power_a = fetch_all(
-            api, config["device_id"], "power_a", start_ms, end_ms
+        extraction_started = time.perf_counter()
+        print(f"\nRequesting power_a and power_b together for {args.date}...")
+        readings = fetch_all(
+            api, config["device_id"], ["power_a", "power_b"], start_ms, end_ms,
+            args.window_minutes, args.pagination_delay,
         )
+        power_a = readings["power_a"]
+        power_b = readings["power_b"]
 
-        print("\nPausing before power_b...")
-        time.sleep(3)
-
-        print(f"\nRequesting power_b for {args.date}...")
-        power_b = fetch_all(
-            api, config["device_id"], "power_b", start_ms, end_ms
-        )
-
+        combine_started = time.perf_counter()
         rows = combine(power_a, power_b)
+        combine_seconds = time.perf_counter() - combine_started
 
         print("\nStoring readings in SQLite...")
+        db_started = time.perf_counter()
         inserted, updated = store_readings(
             connection, rows, source_name
         )
+        db_seconds = time.perf_counter() - db_started
 
         completed_at = datetime.now(TZ).isoformat()
         record_run(
@@ -411,6 +499,29 @@ def main():
         print(f"Power_A readings: {len(power_a)}")
         print(f"Power_B readings: {len(power_b)}")
         print(f"Combined rows:    {len(rows)}")
+        print("\nTiming summary")
+        print(f"  API requests:       {METRICS['api_requests']}")
+        print(f"  API request time:   {METRICS['api_seconds']:.2f}s")
+        print(f"  API failures:       {METRICS['api_failures']}")
+        print(f"  Rate-limit retries: {METRICS['rate_limit_retries']}")
+        print(f"  API pages:          {METRICS['pages']}")
+        print(f"  Time windows:       {METRICS['windows']}")
+        print(f"  Window elapsed:     {METRICS['window_seconds']:.2f}s")
+        print(f"  Parsing time:       {METRICS['parse_seconds']:.2f}s")
+        print(f"  Sleep: between windows  {METRICS['sleep_between_windows_seconds']:.2f}s")
+        print(f"  Sleep: pagination       {METRICS['sleep_pagination_seconds']:.2f}s")
+        print(f"  Sleep: rate limits      {METRICS['sleep_rate_limit_seconds']:.2f}s")
+        sleep_total = sum(
+            METRICS[key] for key in (
+                "sleep_between_windows_seconds",
+                "sleep_pagination_seconds",
+                "sleep_rate_limit_seconds",
+            )
+        )
+        print(f"  Sleep total:        {sleep_total:.2f}s")
+        print(f"  Combine time:       {combine_seconds:.2f}s")
+        print(f"  Database time:      {db_seconds:.2f}s")
+        print(f"  Total work time:    {time.perf_counter() - extraction_started:.2f}s")
         print(f"Rows inserted:    {inserted}")
         print(f"Rows updated:     {updated}")
         print("Rows rejected:    0")
