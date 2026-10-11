@@ -57,9 +57,9 @@ def parse_args():
                    help="PVGIS simulation script containing the shared model")
     p.add_argument("--pv-cache", default=None)
     p.add_argument("--output-dir", default="solar report/outage simulation")
-    p.add_argument("--battery-kwh", type=float, default=15.0)
-    p.add_argument("--reserve", type=float, default=0.20)
-    p.add_argument("--inverter-kw", type=float, default=8.0)
+    p.add_argument("--battery-kwh", type=float, default=None)
+    p.add_argument("--reserve", type=float, default=None)
+    p.add_argument("--inverter-kw", type=float, default=None)
     p.add_argument("--geyser-max-kw", type=float, default=3.0)
     p.add_argument(
         "--start-soc-mode",
@@ -88,12 +88,12 @@ def load_model(path):
     return mod
 
 
-def build_pv(mod, year, cache, no_download):
+def build_pv(mod, year, cache, no_download, solar):
     east_data, _, _ = mod.fetch_pvgis(
-        mod.EAST_KWP, -90, year, cache, no_download
+        solar["east_kwp"], -90, year, cache, no_download
     )
     west_data, _, _ = mod.fetch_pvgis(
-        mod.WEST_KWP, 90, year, cache, no_download
+        solar["west_kwp"], 90, year, cache, no_download
     )
 
     east = mod.pvgis_hourly(east_data)
@@ -105,21 +105,16 @@ def build_pv(mod, year, cache, no_download):
 
     return pv
 
-
 def build_scaled_load(mod, load_profile, projection, day):
     """
-    Retain the measured hourly shape while scaling the two load components
-    independently to the projected energy for this calendar day.
+    Scale the normalised hourly non-geyser profile to the projected
+    daily energy, retaining the projected geyser energy.
     """
     projected = projection[(day.month, day.day)]
 
-    non_geyser_scale = (
-        projected["non_geyser_kwh"] /
-        load_profile["non_geyser_kwh"]
-    )
-
     non_geyser = {
-        h: load_profile["hourly_non_geyser"].get(h, 0.0) * non_geyser_scale
+        h: projected["non_geyser_kwh"]
+        * load_profile["non_geyser_fraction"].get(h, 0.0)
         for h in range(24)
     }
 
@@ -331,20 +326,43 @@ def main():
 
     mod = load_model(script)
 
-    pv = build_pv(mod, args.year, cache, args.no_download)
-    load_profile = mod.load_complete_measured_day(db)
+    config = mod.load_config()
+    solar = mod.load_solar_defaults(config)
+    # Use config.ini values unless explicitly overridden on the command line.
+    if args.inverter_kw is None:
+        args.inverter_kw = solar["inverter_kw"]
+
+    if args.battery_kwh is None:
+        args.battery_kwh = solar["battery_kwh"]
+
+    if args.reserve is None:
+        args.reserve = solar["reserve_frac"]
+
+    pv = build_pv(mod, args.year, cache, args.no_download, solar)
+    load_profile = mod.load_hourly_shape(db)
     projection = mod.load_daily_projection(db)
 
     print("=" * 72)
     print("Solar Step 6 — grid-outage resilience simulation")
     print("=" * 72)
     print(f"PVGIS year:                 {args.year}")
-    print("PV:                         7.00 kWp (3.5 east + 3.5 west)")
+    print(
+    f"PV:                         "
+    f"{solar['east_kwp'] + solar['west_kwp']:.2f} kWp "
+    f"({solar['east_kwp']:.2f} east + "
+    f"{solar['west_kwp']:.2f} west)")
     print(f"Inverter reference:         {args.inverter_kw:.2f} kW")
     print(f"Battery usable:             {args.battery_kwh:.2f} kWh")
     print(f"Battery reserve:            {args.reserve * 100:.1f}%")
     print("Load model:                 daily_load_projection")
-    print(f"Measured hourly shape:      {load_profile['date']}")
+    print(
+    f"Measured hourly shape:      "
+    f"{load_profile['complete_days']} complete days"
+        )
+    print(
+        f"Average non-geyser load:    "
+        f"{load_profile['average_non_geyser_kwh']:.3f} kWh/day"
+    )
     print("Outage geyser strategy:     excess PV only after battery is full")
     if args.start_soc_mode == "full":
         print("Outage starting SOC:         100% (full battery)")
