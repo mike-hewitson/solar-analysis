@@ -63,10 +63,10 @@ def run_case(base_script, year, battery, root, solar_defaults, db_path, pv_cache
     for ts, p in east.items():
         pv[(ts.date(), ts.hour)] = p + west.get(ts, 0.0)
 
-    load = mod.load_complete_measured_day(db_path)
+    hourly_shape = mod.load_hourly_shape(db_path)
     daily_projection = mod.load_daily_projection(db_path)
     daily, annual, monthly, min_soc, max_soc = mod.simulate_year(
-        pv, load, daily_projection, a, year
+    pv, hourly_shape, daily_projection, a, year
     )
 
     june = monthly[6]
