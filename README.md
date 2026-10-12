@@ -997,8 +997,7 @@ There is no need to manually edit the SQLite database.
 
 The raw readings should be treated as historical measurements.
 
-If an analysis rule changes — for example, the geyser noise threshold changes
-from 20 W to 25 W — simply change `config.ini` and rerun:
+If an analysis rule changes — for example, the geyser noise threshold changesfrom 20 W to 25 W — simply change `config.ini` and rerun:
 
 ```bash
 python3 solar_analysis.py
@@ -1032,6 +1031,112 @@ Potential future additions include:
 
 The ultimate objective is to use the measured household profile to replace
 generic assumptions in the solar-system design.
+
+---
+
+## Annual PVGIS simulation: daily load inputs
+
+The PVGIS simulation uses two different household-load inputs:
+
+1. **Daily energy targets:** the `daily_load_projection` table supplies projected
+   total, geyser and non-geyser energy for every calendar day of the simulated year.
+   The projection is mapped to the PVGIS year by month and day.
+2. **Hourly load shape:** the latest complete measured day in `meter_readings` is
+   used to construct the hourly household-load profile. The non-geyser hourly profile
+   is scaled separately for each simulated day to match that day's projected
+   non-geyser energy. The geyser target comes from that day's projected geyser energy.
+
+Consequently, the startup figures labelled “Measured load day”, “Measured daily
+load”, “Measured geyser” and “Measured non-geyser” describe the latest complete
+measured day. They are diagnostic baseline figures; they are **not** copied as the
+same daily energy total for every day of the annual simulation.
+
+The script prints `Projection days available` to show how many daily projection
+records were loaded. It expects a full calendar year's worth of dates.
+
+The hourly profile in this script is based on the latest complete measured day,
+not an average of all complete days. As more measurements accumulate, this remains
+a limitation unless the load-profile logic is deliberately changed.
+
+---
+
+## Grid-outage resilience simulation
+
+Script:
+
+```text
+solar_outage_simulation_updated.py
+```
+
+The outage simulation reuses the PVGIS model in `solar_pvgis_simulation.py` and
+uses `daily_load_projection` for daily demand. It evaluates every possible outage
+start date in the selected PVGIS year for one-, two- and three-day outages.
+
+Run from the Solar project directory:
+
+```bash
+cd ~/Documents/Solar
+python3 solar_outage_simulation_updated.py
+```
+
+By default, **each outage starts with a fully charged battery**. This is the primary
+resilience case: the grid fails unexpectedly while the battery is full. The model
+uses a 15 kWh usable battery, 20% reserve and 8 kW inverter by default.
+
+A secondary mode starts each outage with the state of charge reached by the
+preceding normal grid-connected day:
+
+```bash
+python3 solar_outage_simulation_updated.py --start-soc-mode normal
+```
+
+This represents an outage occurring after poor-solar days have already depleted
+the battery. It is a separate stress test and should not be confused with the
+default full-battery case.
+
+During an outage, the dispatch priority is:
+
+```text
+PV → non-geyser household load → battery
+                                  ↓
+                      surplus PV after battery is full
+                                  ↓
+                                geyser
+```
+
+The geyser is discretionary during an outage and is heated only from PV surplus
+after the battery is full. The model does not deliberately discharge the battery
+to heat the geyser. Grid import is zero during the simulated outage; any household
+load that cannot be supplied by PV and battery down to the reserve is recorded as
+unserved.
+
+The script writes all tested outage windows to:
+
+```text
+solar report/outage simulation/
+```
+
+The output CSV filename identifies the PVGIS year and starting-SOC mode, for example:
+
+```text
+pvgis 2023 outage windows - full battery.csv
+pvgis 2023 outage windows - normal SOC.csv
+```
+
+Results include outage dates and duration, starting/minimum/ending battery SOC,
+PV generation, non-geyser household load, battery charge and discharge, unserved
+household energy, geyser energy required and heated, curtailed PV, and whether the
+battery reserve was reached.
+
+Important limitations:
+
+- “House load” in the outage model excludes the geyser, because geyser heating is
+  treated as discretionary during an outage.
+- The model does not explicitly separate oven use from the measured non-geyser load.
+- The geyser is modelled as an energy load, not as a physical hot-water tank with
+  thermostat and temperature dynamics.
+- This is a resilience study using historical PVGIS weather and projected demand,
+  not an engineering certification or a guarantee of performance during a real outage.
 
 ---
 

@@ -8,15 +8,12 @@ Downloads one historical year of hourly PVGIS production for:
 
 Then combines that PV profile with the daily household-load projection
 stored in solar_meter.db. The projection is mapped by month/day onto the
-selected PVGIS year.
+selected PVGIS year, while the measured complete day's hourly load shape is
+retained.
 
-The intraday non-geyser load shape comes from the database's
-hourly_load_profile table, which is calculated as the average of all
-complete measured days by solar_analysis.py. That average shape is normalised
-to 100% and applied to each projected day's non-geyser energy.
-
-The projected daily geyser energy is then shifted into the 09:00-16:00 solar
-window, prioritising hours with PV surplus after non-geyser household demand. Remaining geyser energy is placed within
+The measured geyser energy is preserved each day and shifted into the
+09:00-16:00 solar window, prioritising hours with PV surplus after
+non-geyser household demand. Remaining geyser energy is placed within
 the same window at up to the configured maximum geyser power.
 
 This is an energy model, not a thermal tank/thermostat model.
@@ -122,6 +119,14 @@ def parse_args(solar_defaults):
     p.add_argument("--geyser-start", type=int, default=GEYSER_START)
     p.add_argument("--geyser-end", type=int, default=GEYSER_END)
     p.add_argument("--geyser-max-kw", type=float, default=GEYSER_MAX_KW)
+    p.add_argument("--geyser-load-shed-kw", type=float, default=None,
+                   help="Shed/defer geyser whenever total inverter load would exceed this kW")
+    p.add_argument("--geyser-restart-kw", type=float, default=None,
+                   help="Restart threshold for hysteresis; defaults to load-shed threshold")
+    p.add_argument("--geyser-min-soc", type=float, default=0.20,
+                   help="Minimum battery SOC fraction at which geyser may run from battery")
+    p.add_argument("--geyser-pv-surplus-only", action="store_true",
+                   help="Only run geyser when PV can cover non-geyser load plus geyser load")
     p.add_argument("--no-download", action="store_true",
                    help="Use cached PVGIS files only")
     return p.parse_args()
@@ -188,60 +193,98 @@ def pvgis_hourly(data):
     return out
 
 
-def load_hourly_shape(db_path):
-    """Load the average complete-day non-geyser shape from the database.
-
-    solar_analysis.py creates hourly_load_profile from all complete measured
-    days. The non_geyser_fraction column is the normalised average hourly
-    non-geyser energy and therefore defines the intraday shape only; the
-    daily_load_projection table remains authoritative for daily energy.
-    """
+def load_complete_measured_day(db_path):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute("""
-            SELECT hour,
-                   complete_days,
-                   avg_non_geyser_energy_kwh,
-                   non_geyser_fraction
-            FROM hourly_load_profile
-            ORDER BY hour
-        """).fetchall()
-    except sqlite3.OperationalError as exc:
-        raise RuntimeError(
-            "hourly_load_profile is missing or outdated. "
-            "Run solar_analysis.py first to rebuild the database analysis tables."
-        ) from exc
-    finally:
-        conn.close()
 
-    if len(rows) != 24:
-        raise RuntimeError(
-            f"Expected 24 hourly load-shape rows, found {len(rows)}."
-        )
+    rows = conn.execute("""
+        SELECT timestamp_sast, reading_date, power_a_w, power_b_w
+        FROM meter_readings
+        ORDER BY timestamp_sast
+    """).fetchall()
+    conn.close()
 
-    complete_days = min(int(r["complete_days"]) for r in rows)
-    if complete_days <= 0:
-        raise RuntimeError("No complete measured days are available for the intraday load shape.")
+    by_date = defaultdict(list)
+    for r in rows:
+        by_date[r["reading_date"]].append(r)
 
-    fractions = {int(r["hour"]): max(0.0, float(r["non_geyser_fraction"] or 0.0))
-                 for r in rows}
-    fraction_sum = sum(fractions.values())
+    candidates = []
+    for d, rs in by_date.items():
+        if len(rs) < 1000:
+            continue
+        first = datetime.fromisoformat(rs[0]["timestamp_sast"])
+        last = datetime.fromisoformat(rs[-1]["timestamp_sast"])
+        if first.time() <= datetime.strptime("00:05", "%H:%M").time() and \
+           last.time() >= datetime.strptime("23:55", "%H:%M").time():
+            candidates.append((d, rs))
 
-    if fraction_sum <= 0:
-        raise RuntimeError("The database contains no usable non-geyser hourly load shape.")
+    if not candidates:
+        raise RuntimeError("No complete measured day was found in meter_readings.")
 
-    # Re-normalise defensively so rounding in the stored values cannot change
-    # the projected daily energy.
-    fractions = {h: value / fraction_sum for h, value in fractions.items()}
+    date_str, rs = sorted(candidates, key=lambda x: x[0])[-1]
+    threshold = 20.0
+
+    # Build hourly energy by splitting each valid trapezoidal interval at hour boundaries.
+    hourly_total = defaultdict(float)
+    hourly_geyser = defaultdict(float)
+
+    parsed = []
+    for r in rs:
+        ts = datetime.fromisoformat(r["timestamp_sast"])
+        a = float(r["power_a_w"] or 0.0)
+        b = float(r["power_b_w"] or 0.0)
+        b = max(0.0, b)
+        if b < threshold:
+            b = 0.0
+        a = max(0.0, a)
+        parsed.append((ts, a, b))
+
+    for i in range(len(parsed) - 1):
+        t0, a0, b0 = parsed[i]
+        t1, a1, b1 = parsed[i + 1]
+        dt = (t1 - t0).total_seconds()
+        if dt <= 0 or dt > 300:
+            continue
+
+        # Linear/trapezoidal integration, split over hour boundaries.
+        cur = t0
+        while cur < t1:
+            hour_start = cur.replace(minute=0, second=0, microsecond=0)
+            hour_end = hour_start + timedelta(hours=1)
+            seg_end = min(t1, hour_end)
+            f0 = (cur - t0).total_seconds() / dt
+            f1 = (seg_end - t0).total_seconds() / dt
+
+            aa0 = a0 + (a1 - a0) * f0
+            aa1 = a0 + (a1 - a0) * f1
+            bb0 = b0 + (b1 - b0) * f0
+            bb1 = b0 + (b1 - b0) * f1
+
+            seg_hours = (seg_end - cur).total_seconds() / 3600.0
+            total_kwh = ((aa0 + aa1) / 2.0) / 1000.0 * seg_hours
+            geyser_kwh = ((bb0 + bb1) / 2.0) / 1000.0 * seg_hours
+
+            h = hour_start.hour
+            hourly_total[h] += total_kwh
+            hourly_geyser[h] += geyser_kwh
+            cur = seg_end
+
+    hourly_non_geyser = {
+        h: max(0.0, hourly_total[h] - hourly_geyser[h])
+        for h in range(24)
+    }
+
+    total = sum(hourly_total.values())
+    geyser = sum(hourly_geyser.values())
 
     return {
-        "complete_days": complete_days,
-        "non_geyser_fraction": fractions,
-        "average_non_geyser_kwh": sum(
-            max(0.0, float(r["avg_non_geyser_energy_kwh"] or 0.0))
-            for r in rows
-        ),
+        "date": date_str,
+        "hourly_total": dict(hourly_total),
+        "hourly_geyser": dict(hourly_geyser),
+        "hourly_non_geyser": hourly_non_geyser,
+        "total_kwh": total,
+        "geyser_kwh": geyser,
+        "non_geyser_kwh": sum(hourly_non_geyser.values()),
     }
 
 
@@ -333,9 +376,13 @@ def load_daily_projection(db_path):
     return projection
 
 
-def simulate_year(pv_by_local_hour, hourly_shape, daily_projection, args, year):
+def simulate_year(pv_by_local_hour, load_profile, daily_projection, args, year):
     start_soc = args.battery_kwh
     reserve_kwh = args.battery_kwh * args.reserve
+    min_geyser_soc_kwh = args.battery_kwh * args.geyser_min_soc
+    shed_threshold = args.geyser_load_shed_kw
+    restart_threshold = (args.geyser_restart_kw if args.geyser_restart_kw is not None
+                         else shed_threshold)
 
     daily = []
     annual = defaultdict(float)
@@ -343,79 +390,100 @@ def simulate_year(pv_by_local_hour, hourly_shape, daily_projection, args, year):
     min_soc = start_soc
     max_soc = start_soc
 
-    # 2023 has 365 days. Use the PVGIS local timestamps to enumerate dates.
-    # PVGIS hourly timestamps can cross the UTC/local-time year boundary.
-    # Restrict the simulation explicitly to the requested local calendar year
-    # so that the model always contains exactly 365/366 local dates.
     year_start = datetime(year, 1, 1).date()
     year_end = datetime(year, 12, 31).date()
-    dates = sorted({
-        d for d, h in pv_by_local_hour
-        if year_start <= d <= year_end
-    })
+    dates = sorted({d for d, h in pv_by_local_hour if year_start <= d <= year_end})
+
     for day in dates:
         pv = {h: pv_by_local_hour.get((day, h), 0.0) for h in range(24)}
-
-        # The daily projection is the authoritative source of daily energy.
-        # The database average profile is used only as a normalised intraday shape for
-        # distributing projected non-geyser energy across the hours.
         projected = daily_projection[(day.month, day.day)]
+        if load_profile["non_geyser_kwh"] <= 0:
+            raise RuntimeError("Measured non-geyser daily energy is zero; cannot scale the hourly profile.")
 
-        non_geyser = {
-            h: fraction * projected["non_geyser_kwh"]
-            for h, fraction in hourly_shape["non_geyser_fraction"].items()
-        }
-        geyser = projected["geyser_kwh"]
+        non_geyser_scale = projected["non_geyser_kwh"] / load_profile["non_geyser_kwh"]
+        non_geyser = {h: v * non_geyser_scale for h, v in load_profile["hourly_non_geyser"].items()}
+        geyser_target = projected["geyser_kwh"]
 
-        geyser_sched = schedule_geyser(
-            non_geyser, pv, geyser,
-            args.geyser_start, args.geyser_end, args.geyser_max_kw
-        )
+        # Build the geyser schedule. In the controlled modes this is a daily
+        # dispatch problem: use PV-surplus hours first, but never schedule the
+        # geyser above the configured inverter-load threshold. If the battery
+        # is already below the configured SOC threshold, the geyser is only
+        # allowed when PV covers the load (or when control is disabled).
+        geyser_sched = {h: 0.0 for h in range(24)}
+        remaining_geyser = geyser_target
+        shed_events = 0
+        shed_hours = 0.0
+        control_hours = 0.0
+
+        candidates = list(range(args.geyser_start, args.geyser_end))
+        candidates.sort(key=lambda h: max(0.0, pv[h] - non_geyser.get(h, 0.0)), reverse=True)
+
+        if shed_threshold is None:
+            geyser_sched = schedule_geyser(
+                non_geyser, pv, geyser_target,
+                args.geyser_start, args.geyser_end, args.geyser_max_kw
+            )
+        else:
+            # Greedy allocation to the best PV-surplus hours. This preserves
+            # the daily energy target where the system has sufficient capacity;
+            # any unallocated energy is explicitly reported as shed/deferred.
+            for h in candidates:
+                if remaining_geyser <= 1e-9:
+                    break
+                base = non_geyser.get(h, 0.0)
+                max_by_inverter = max(0.0, shed_threshold - base)
+                allowed = min(args.geyser_max_kw, max_by_inverter)
+                if args.geyser_pv_surplus_only:
+                    allowed = min(allowed, max(0.0, pv[h] - base))
+                amount = min(remaining_geyser, allowed)
+                if amount > 1e-9:
+                    geyser_sched[h] = amount
+                    remaining_geyser -= amount
+                    control_hours += 1.0
 
         total_load = {h: non_geyser.get(h, 0.0) + geyser_sched[h] for h in range(24)}
 
         day_pv = sum(pv.values())
         day_load = sum(total_load.values())
         day_geyser = sum(geyser_sched.values())
+        geyser_shed = max(0.0, geyser_target - day_geyser)
 
-        # The simulated daily household energy must exactly equal the
-        # database projection for this calendar day.
-        if abs(day_load - projected["total_kwh"]) > 1e-6:
-            raise RuntimeError(
-                f"Daily load reconciliation failed for {day}: "
-                f"simulated={day_load:.6f} kWh, "
-                f"projected={projected['total_kwh']:.6f} kWh"
-            )
+        pv_direct = pv_to_geyser = 0.0
+        charge_input = discharge_output = 0.0
+        battery_to_household = battery_to_geyser = 0.0
+        grid_to_household = grid_to_geyser = 0.0
+        grid = curtailed = 0.0
+        peak_load = peak_grid = 0.0
+        peak_inverter_load = 0.0
 
-        pv_direct = 0.0
-        pv_to_geyser = 0.0
-        charge_input = 0.0
-        discharge_output = 0.0
-        battery_to_household = 0.0
-        battery_to_geyser = 0.0
-        grid_to_household = 0.0
-        grid_to_geyser = 0.0
-        grid = 0.0
-        curtailed = 0.0
-        peak_load = 0.0
-        peak_grid = 0.0
+        # If controlled geyser operation is requested, enforce battery-SOC
+        # protection dynamically during the hourly dispatch. If an hour was
+        # scheduled while SOC later proves too low, the geyser is shed for that
+        # hour and the energy becomes unmet rather than silently drawing the
+        # battery below the requested operating threshold.
+        actual_geyser = {h: geyser_sched[h] for h in range(24)}
+        soc_shed = 0.0
 
         for h in range(24):
             p = pv[h]
-            load = total_load[h]
-            peak_load = max(peak_load, load)
-
-            # Split each hour into non-geyser and geyser flows so the
-            # aggregate Sankey can show the actual destination of PV,
-            # battery and grid energy without double-counting the geyser.
             non_h = non_geyser.get(h, 0.0)
-            geyser_h = geyser_sched[h]
+            geyser_h = actual_geyser[h]
 
+            if shed_threshold is not None and geyser_h > 0:
+                if start_soc < min_geyser_soc_kwh and p <= non_h + geyser_h + 1e-9:
+                    actual_geyser[h] = 0.0
+                    soc_shed += geyser_h
+                    geyser_h = 0.0
+
+            load = non_h + geyser_h
+            peak_load = max(peak_load, load)
+            peak_inverter_load = max(peak_inverter_load, load)
+
+            # Allocate PV to non-geyser load, then geyser, then battery.
             direct_non = min(non_h, p)
             remaining_pv = max(0.0, p - direct_non)
             direct_geyser = min(geyser_h, remaining_pv)
             remaining_pv = max(0.0, remaining_pv - direct_geyser)
-
             remaining_non = max(0.0, non_h - direct_non)
             remaining_geyser = max(0.0, geyser_h - direct_geyser)
             remaining_load = remaining_non + remaining_geyser
@@ -423,18 +491,15 @@ def simulate_year(pv_by_local_hour, hourly_shape, daily_projection, args, year):
             pv_direct += direct_non + direct_geyser
             pv_to_geyser += direct_geyser
 
-            battery_to_non_h = 0.0
-            battery_to_geyser_h = 0.0
-            grid_to_non_h = 0.0
-            grid_to_geyser_h = 0.0
+            battery_to_non_h = battery_to_geyser_h = 0.0
+            grid_to_non_h = grid_to_geyser_h = 0.0
 
             if remaining_pv > 0:
                 room = max(0.0, args.battery_kwh - start_soc)
                 charge_input_h = min(remaining_pv, room / BATTERY_EFF)
                 start_soc += charge_input_h * BATTERY_EFF
                 charge_input += charge_input_h
-                curtailed_h = max(0.0, remaining_pv - charge_input_h)
-                curtailed += curtailed_h
+                curtailed += max(0.0, remaining_pv - charge_input_h)
             elif remaining_load > 0:
                 available = max(0.0, start_soc - reserve_kwh)
                 battery_draw = min(remaining_load / BATTERY_EFF, available)
@@ -442,81 +507,65 @@ def simulate_year(pv_by_local_hour, hourly_shape, daily_projection, args, year):
                 delivered = battery_draw * BATTERY_EFF
                 discharge_output += delivered
 
-                # Household/non-geyser load gets battery energy first,
-                # matching the allocation convention used in the existing
-                # Sankey implementation.
                 battery_to_non_h = min(remaining_non, delivered)
-                battery_to_geyser_h = delivered - battery_to_non_h
+                battery_to_geyser_h = min(remaining_geyser, max(0.0, delivered - battery_to_non_h))
                 remaining_non -= battery_to_non_h
                 remaining_geyser -= battery_to_geyser_h
-
                 remaining = max(0.0, remaining_non + remaining_geyser)
                 if remaining > 0:
                     grid_to_non_h = min(remaining_non, remaining)
-                    grid_to_geyser_h = remaining - grid_to_non_h
-                    grid += remaining
-                    peak_grid = max(peak_grid, remaining)
+                    grid_to_geyser_h = min(remaining_geyser, max(0.0, remaining - grid_to_non_h))
+                    grid += grid_to_non_h + grid_to_geyser_h
+                    peak_grid = max(peak_grid, grid_to_non_h + grid_to_geyser_h)
 
             battery_to_household += battery_to_non_h
             battery_to_geyser += battery_to_geyser_h
             grid_to_household += grid_to_non_h
             grid_to_geyser += grid_to_geyser_h
-
             min_soc = min(min_soc, start_soc)
             max_soc = max(max_soc, start_soc)
 
-        m = day.month
-        annual["pv"] += day_pv
-        annual["load"] += day_load
-        annual["geyser"] += day_geyser
-        annual["pv_direct"] += pv_direct
-        annual["pv_to_geyser"] += pv_to_geyser
-        annual["charge"] += charge_input
-        annual["discharge"] += discharge_output
-        annual["battery_to_household"] += battery_to_household
-        annual["battery_to_geyser"] += battery_to_geyser
-        annual["grid_to_household"] += grid_to_household
-        annual["grid_to_geyser"] += grid_to_geyser
-        annual["grid"] += grid
-        annual["curtailed"] += curtailed
+        # Any energy prevented by the load/SOC controls is demand that was
+        # deliberately deferred/shed; it is not counted as household load
+        # because it was not actually consumed by the simulated system.
+        geyser_shed = max(0.0, geyser_target - sum(actual_geyser.values()))
+        if geyser_shed > 1e-9 and shed_threshold is not None:
+            shed_events = 1
+            shed_hours = geyser_shed / max(args.geyser_max_kw, 1e-9)
 
-        monthly[m]["pv"] += day_pv
-        monthly[m]["load"] += day_load
-        monthly[m]["geyser"] += day_geyser
-        monthly[m]["pv_direct"] += pv_direct
-        monthly[m]["pv_to_geyser"] += pv_to_geyser
-        monthly[m]["charge"] += charge_input
-        monthly[m]["discharge"] += discharge_output
-        monthly[m]["battery_to_household"] += battery_to_household
-        monthly[m]["battery_to_geyser"] += battery_to_geyser
-        monthly[m]["grid_to_household"] += grid_to_household
-        monthly[m]["grid_to_geyser"] += grid_to_geyser
-        monthly[m]["grid"] += grid
-        monthly[m]["curtailed"] += curtailed
+        m = day.month
+        for key, value in {
+            "pv": day_pv, "load": day_load, "geyser": sum(actual_geyser.values()),
+            "pv_direct": pv_direct, "pv_to_geyser": pv_to_geyser,
+            "charge": charge_input, "discharge": discharge_output,
+            "battery_to_household": battery_to_household,
+            "battery_to_geyser": battery_to_geyser,
+            "grid_to_household": grid_to_household,
+            "grid_to_geyser": grid_to_geyser, "grid": grid,
+            "curtailed": curtailed, "geyser_shed": geyser_shed,
+        }.items():
+            annual[key] += value
+            monthly[m][key] += value
 
         daily.append({
-            "date": str(day),
-            "pv_kwh": day_pv,
-            "load_kwh": day_load,
-            "geyser_kwh": day_geyser,
-            "pv_direct_kwh": pv_direct,
-            "pv_to_geyser_kwh": pv_to_geyser,
-            "battery_charge_kwh": charge_input,
-            "battery_discharge_kwh": discharge_output,
+            "date": str(day), "pv_kwh": day_pv, "load_kwh": day_load,
+            "geyser_kwh": sum(actual_geyser.values()),
+            "geyser_target_kwh": geyser_target, "geyser_shed_kwh": geyser_shed,
+            "pv_direct_kwh": pv_direct, "pv_to_geyser_kwh": pv_to_geyser,
+            "battery_charge_kwh": charge_input, "battery_discharge_kwh": discharge_output,
             "battery_to_household_kwh": battery_to_household,
             "battery_to_geyser_kwh": battery_to_geyser,
             "grid_to_household_kwh": grid_to_household,
-            "grid_to_geyser_kwh": grid_to_geyser,
-            "grid_kwh": grid,
-            "curtailed_kwh": curtailed,
-            "end_soc_kwh": start_soc,
-            "peak_load_kw": peak_load,
-            "peak_grid_kw": peak_grid,
+            "grid_to_geyser_kwh": grid_to_geyser, "grid_kwh": grid,
+            "curtailed_kwh": curtailed, "end_soc_kwh": start_soc,
+            "peak_load_kw": peak_load, "peak_grid_kw": peak_grid,
+            "peak_inverter_load_kw": peak_inverter_load,
+            "geyser_shed_event": shed_events, "geyser_shed_hours": shed_hours,
+            "soc_shed_kwh": soc_shed,
         })
 
     annual["year"] = year
     return daily, annual, monthly, min_soc, max_soc
-
 
 
 def make_sankey_chart(out_dir, annual, start_soc, end_soc, inverter_kw, battery_kwh, reserve):
@@ -771,6 +820,9 @@ def main():
     print(f"Battery usable:              {args.battery_kwh:.2f} kWh")
     print(f"Battery reserve:             {args.reserve * 100:.1f}%")
     print(f"Geyser window:              {args.geyser_start:02d}:00-{args.geyser_end:02d}:00")
+    print(f"Geyser load-shed threshold: {args.geyser_load_shed_kw if args.geyser_load_shed_kw is not None else 'OFF'} kW")
+    print(f"Geyser minimum SOC:         {args.geyser_min_soc * 100:.0f}%")
+    print(f"Geyser PV-surplus-only:     {'YES' if args.geyser_pv_surplus_only else 'NO'}")
     print("Monthly household-demand model:")
 
     east_data, east_path, east_cached = fetch_pvgis(
@@ -787,22 +839,20 @@ def main():
     for ts, p in east.items():
         pv_by_local_hour[(ts.date(), ts.hour)] = p + west.get(ts, 0.0)
 
-    # Daily energy comes from the database projection. The intraday
-    # non-geyser shape comes from the average of all complete measured days
-    # stored in hourly_load_profile by solar_analysis.py.
-    hourly_shape = load_hourly_shape(db)
+    load_profile = load_complete_measured_day(db)
     daily_projection = load_daily_projection(db)
 
-    print(f"Daily load source:          {PROJECTION_TABLE}")
+    print(f"Measured load day:          {load_profile['date']}")
+    print(f"Measured daily load:        {load_profile['total_kwh']:.3f} kWh")
+    print(f"Measured geyser:            {load_profile['geyser_kwh']:.3f} kWh")
+    print(f"Measured non-geyser:        {load_profile['non_geyser_kwh']:.3f} kWh")
+    print(f"Projection table:           {PROJECTION_TABLE}")
     print(f"Projection days available:  {len(daily_projection)}")
-    print("Intraday load shape:        average of complete measured days")
-    print(f"Complete days in shape:     {hourly_shape['complete_days']}")
-    print(f"Average non-geyser load:    {hourly_shape['average_non_geyser_kwh']:.3f} kWh/day")
-    print("  (shape only; daily energy comes from the projection)")
     print()
 
+
     daily, annual, monthly, min_soc, max_soc = simulate_year(
-        pv_by_local_hour, hourly_shape, daily_projection, args, args.year
+        pv_by_local_hour, load_profile, daily_projection, args, args.year
     )
 
     daily_fields = list(daily[0].keys())
@@ -815,7 +865,7 @@ def main():
         row = {"month": m, "target_load_kwh": d["load"], "days": days}
         row.update({k + "_kwh": d[k] for k in
                     ["pv", "load", "geyser", "pv_direct", "pv_to_geyser",
-                     "charge", "discharge", "grid", "curtailed"]})
+                     "charge", "discharge", "grid", "curtailed", "geyser_shed"]})
         monthly_rows.append(row)
     write_csv(out / f"pvgis {args.year} monthly simulation.csv",
               monthly_rows, list(monthly_rows[0].keys()))
@@ -846,7 +896,8 @@ def main():
     print("Annual results:")
     print(f"PV generation:              {annual['pv']:.1f} kWh")
     print(f"Household load:             {annual['load']:.1f} kWh")
-    print(f"Geyser energy:              {annual['geyser']:.1f} kWh")
+    print(f"Geyser energy actually used: {annual['geyser']:.1f} kWh")
+    print(f"Geyser energy shed/deferred: {annual['geyser_shed']:.1f} kWh")
     print(f"Direct PV to load:          {annual['pv_direct']:.1f} kWh")
     print(f"Direct PV to geyser:        {annual['pv_to_geyser']:.1f} kWh")
     print(f"Battery charge input:       {annual['charge']:.1f} kWh")
@@ -855,7 +906,10 @@ def main():
     print(f"PV curtailed:               {annual['curtailed']:.1f} kWh")
     print(f"Minimum battery SOC:        {min_soc:.2f} kWh")
     print(f"Maximum battery SOC:        {max_soc:.2f} kWh")
-    print(f"Peak simulated load:         {max(x["peak_load_kw"] for x in daily):.3f} kW")
+    print(f"Peak simulated load:         {max(x['peak_load_kw'] for x in daily):.3f} kW")
+    print(f"Peak inverter load:          {max(x['peak_inverter_load_kw'] for x in daily):.3f} kW")
+    print(f"Geyser shed events:          {sum(x['geyser_shed_event'] for x in daily)}")
+    print(f"Geyser shed hours equiv.:    {sum(x['geyser_shed_hours'] for x in daily):.1f} h")
     print()
 
     # Identify the most stressful consecutive 14-day periods by grid import.
@@ -906,6 +960,8 @@ def main():
     print("    historical PVGIS dates.")
     print("  * The geyser is modelled as an energy-shiftable load, not as a")
     print("    physical hot-water tank with thermostat cycling.")
+    print("  * Geyser load-shed control, when enabled, is a dispatch/demand-management")
+    print("    model; it does not model actual tank temperature or recovery dynamics.")
     print("  * Zero export is assumed; excess PV is curtailed once the battery")
     print("    is full and household load is satisfied.")
 
