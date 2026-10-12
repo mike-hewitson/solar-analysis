@@ -59,6 +59,7 @@ The important files are:
 | `tuya_power_extractor.py` | Downloads meter readings from Tuya and stores them in SQLite |
 | `solar_analysis.py` | Builds cleaned readings, daily summaries and hourly profiles |
 | `solar_report.py` | Produces charts, CSV reports and planning summaries |
+| `plot_non_geyser_power.py` | Plots total and/or non-geyser power for a selected day from existing database readings |
 | `solar_meter.db` | SQLite database containing the meter data and derived analysis |
 | `solar report/` | Output directory created by `solar_report.py` |
 
@@ -487,9 +488,112 @@ solar hourly load profile.csv
 
 Contains the complete-day hourly profile.
 
+
+
 ---
 
-# 13. Normal operating procedure
+# 13. Program 4 — Single-day power chart
+
+## `plot_non_geyser_power.py`
+
+This script creates a graph for one calendar day using readings already stored
+in `solar_meter.db`. The `--chart both` option plots three lines together: geyser,
+non-geyser and total household power. It does **not** contact Tuya, extract data,
+or modify the database.
+
+If `--date` is omitted, it charts yesterday using South African local time.
+
+Run from the Solar directory:
+
+```bash
+cd ~/Documents/Solar
+```
+
+### Chart non-geyser power (default)
+
+```bash
+python3 plot_non_geyser_power.py
+```
+
+### Chart geyser power
+
+```bash
+python3 plot_non_geyser_power.py --chart geyser
+```
+
+### Chart total household power
+
+```bash
+python3 plot_non_geyser_power.py --chart total
+```
+
+### Chart geyser, non-geyser and total power
+
+```bash
+python3 plot_non_geyser_power.py --chart both
+```
+
+### Chart a specific date
+
+Supply the date in `YYYY-MM-DD` format:
+
+```bash
+python3 plot_non_geyser_power.py --date 2026-10-11
+```
+
+Combine the date and chart selection as needed:
+
+```bash
+python3 plot_non_geyser_power.py --date 2026-10-11 --chart both
+python3 plot_non_geyser_power.py --date 2026-10-11 --chart geyser
+```
+
+### Display the graph after saving
+
+Add `--show` to open the graph window:
+
+```bash
+python3 plot_non_geyser_power.py --chart both --show
+```
+
+### Output
+
+For `--chart both`, the graph includes geyser power, non-geyser power and total
+household power, with a legend and daily energy totals in the footer.
+
+The PNG graph is saved in:
+
+```text
+~/Documents/Solar/solar report/
+```
+
+The filename includes the chart type and date, for example:
+
+```text
+non_geyser_power_2026-10-11.png
+geyser_power_2026-10-11.png
+total_power_2026-10-11.png
+geyser_non_geyser_and_total_power_2026-10-11.png
+```
+
+The script also prints the number of readings, the energy totals relevant to
+the selected chart, and the peak total and non-geyser power with their times.
+Energy integration ignores gaps longer than five minutes.
+
+Non-geyser power is calculated as total household power (`Power_A`) minus
+cleaned geyser power (`Power_B`). Negative geyser readings are treated as zero,
+and geyser readings below the 20 W noise threshold are treated as zero.
+Negative resulting non-geyser power is also clamped to zero.
+
+The script requires Matplotlib. If needed, install it with:
+
+```bash
+python3 -m pip install matplotlib
+```
+
+---
+
+# 15. Normal operating procedure
 
 Once the system is established, the normal workflow is:
 
@@ -546,7 +650,7 @@ charts + CSV reports
 
 ---
 
-# 14. Database
+# 15. Database
 
 The database is:
 
@@ -595,7 +699,7 @@ The derived objects can safely be rebuilt from the raw data.
 
 ---
 
-# 15. Backups
+# 16. Backups
 
 The SQLite database should be backed up periodically.
 
@@ -622,7 +726,7 @@ is preferable to simply copying the file.
 
 ---
 
-# 16. Current data interpretation
+# 17. Current data interpretation
 
 The current project assumes:
 
@@ -644,7 +748,7 @@ Power_B will no longer represent the geyser alone.
 
 ---
 
-# 17. Current limitations
+# 18. Current limitations
 
 At present, the hourly profile is based only on complete calendar days.
 
@@ -660,7 +764,7 @@ representative.
 
 ---
 
-# 18. Solar-planning use
+# 19. Solar-planning use
 
 The eventual purpose of this data is to provide a measured load profile for
 the house's solar design.
@@ -694,7 +798,7 @@ the proposed east/west roof installation.
 
 ---
 
-# 19. Current solar-system context
+# 20. Current solar-system context
 
 The measured load data is intended to support the new-house solar design.
 
@@ -721,7 +825,7 @@ assumptions used in earlier solar simulations.
 
 ---
 
-# 20. Python environment
+# 21. Python environment
 
 The current project has been running using:
 
@@ -759,7 +863,7 @@ That is not required for the current system to operate.
 
 ---
 
-# 21. Troubleshooting
+# 22. Troubleshooting
 
 ## `ModuleNotFoundError: No module named 'matplotlib'`
 
@@ -838,7 +942,7 @@ data.
 
 ---
 
-# 22. Useful checks
+# 23. Useful checks
 
 Check that the database exists:
 
@@ -872,7 +976,7 @@ python3 solar_report.py
 
 ---
 
-# 23. Recommended long-term workflow
+# 24. Recommended long-term workflow
 
 As data accumulates, the preferred workflow is:
 
@@ -905,7 +1009,7 @@ remain unchanged.
 
 ---
 
-# 24. Future extensions
+# 25. Future extensions
 
 The project is deliberately structured so that further analysis can be added
 without changing the raw data collection.
