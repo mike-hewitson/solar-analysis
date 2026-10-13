@@ -163,15 +163,16 @@ and the threshold changed if necessary.
 ## `tuya_power_extractor.py`
 
 This program retrieves meter readings from the Tuya Cloud API and writes them
-directly into the SQLite database. It requests `power_a` and `power_b` together
-and stores the combined readings in `solar_meter.db`.
+to the database configured in `config.ini`. It requests `power_a` and `power_b`
+together and stores the combined readings.
 
 The extractor is designed to be **idempotent**:
 
-- Running the same date more than once is safe.
+- Re-fetching an overlapping time range is safe.
 - Existing timestamps are updated rather than duplicated.
 - New timestamps are inserted.
 - Extraction runs are recorded in the database.
+- No-argument runs save a successful catch-up endpoint in `database_info`.
 
 The database therefore contains one row per unique meter timestamp.
 
@@ -183,14 +184,20 @@ Change to the Solar directory:
 cd ~/Documents/Solar
 ```
 
-### Extract yesterday's complete day (default)
+### Catch up from the saved endpoint (default)
 
 ```bash
 python3 tuya_power_extractor.py
 ```
 
-If `--date` is omitted, the script selects yesterday using the
-`Africa/Johannesburg` timezone. This is the recommended normal daily command.
+With no arguments, the script resumes from the saved endpoint. On its first
+run, it uses the day after the most recent successful legacy daily extraction.
+Each run re-fetches a 10-minute overlap to pick up late Tuya readings and stops
+5 minutes before the current time. The endpoint advances only after readings,
+run history, and checkpoint are committed successfully. A missed manual run
+therefore makes the next run cover the whole gap. This is the normal command
+for manual catch-up runs, such as when testing from the MacBook. On the Ubuntu
+mini, systemd runs this no-argument catch-up automatically every two hours.
 
 ### Extract a specific date
 
@@ -200,6 +207,43 @@ python3 tuya_power_extractor.py --date 2026-10-09
 
 The extractor requests the complete South African calendar day, from midnight
 on the selected date up to (but not including) midnight on the following day.
+Use this option for historical backfills; it does not move the catch-up cursor.
+
+### Failure notification
+
+The extractor can send a failure alert to the existing ntfy topic. Set the
+`SOLAR_NTFY_TOPIC` environment variable before running it; the topic is not
+stored in the script or project files. Successful runs do not send a message.
+If the variable is unset, the extraction still runs normally and reports that
+failure alerts are not configured if a run fails.
+
+On the mini, the systemd wrapper reads `NTFY_TOPIC` from
+`~/.config/solar-db-backup/ntfy.env` and passes it to the extractor as
+`SOLAR_NTFY_TOPIC`. The topic value remains in that private environment file.
+
+## Mini deployment and schedule
+
+The routine extractor runs on the Ubuntu Mac mini (`pihole`) from
+`~/solar-tuya-extractor`, using the mini's local PostgreSQL database. Its
+systemd oneshot service runs the extractor without arguments, and its timer
+runs every two hours at even hours in `Africa/Johannesburg` time. The timer is
+persistent, so a run missed while the mini is off is started after it returns.
+
+The first catch-up on the mini completed successfully on 2026-10-13: 54 rows
+were inserted, 57 overlapping rows were updated, and the Tuya API reported no
+failures.
+
+Useful commands to check or start the mini service:
+
+```bash
+systemctl list-timers --all --no-pager | grep solar-tuya
+sudo systemctl status solar-tuya-extractor.service --no-pager -l
+sudo journalctl -u solar-tuya-extractor.service -n 40 --no-pager
+sudo systemctl start solar-tuya-extractor.service
+```
+
+Avoid starting a manual extractor run on the MacBook while a mini run is in
+progress. Both installations use the same PostgreSQL checkpoint and database.
 
 ### Optionally write a CSV copy
 
@@ -208,7 +252,7 @@ python3 tuya_power_extractor.py --output-csv yesterday.csv
 ```
 
 A relative CSV path is written in the Solar project directory. CSV output is
-optional; SQLite remains the primary data store.
+optional; the database selected in `config.ini` remains the primary data store.
 
 ## Current performance defaults
 
@@ -245,7 +289,7 @@ python3 tuya_power_extractor.py --date 2026-10-09 --pagination-delay 0.5
 
 The extractor prints a timing summary at the end, including API requests,
 request time, pagination and between-window sleeps, rate-limit retries, and
-SQLite storage time. This makes it easier to spot a change in API behaviour.
+database storage time. This makes it easier to spot a change in API behaviour.
 
 ## Configuration
 
@@ -595,26 +639,30 @@ python3 -m pip install matplotlib
 
 # 15. Normal operating procedure
 
-Once the system is established, the normal workflow is:
+The mini collects Tuya readings automatically every two hours. The rest of the
+workflow can be run from the MacBook, whose database configuration connects to
+PostgreSQL on the mini:
 
-### Step 1 — Download meter data
+### Step 1 — Check the mini extractor
 
-For the normal daily run, extract yesterday's complete day:
+Confirm the timer and most recent run:
+
+```bash
+ssh piholeadmin@192.168.1.37
+systemctl list-timers --all --no-pager | grep solar-tuya
+sudo systemctl status solar-tuya-extractor.service --no-pager -l
+```
+
+To start an extra catch-up run manually on the mini, use:
+
+```bash
+sudo systemctl start solar-tuya-extractor.service
+```
+
+For a historical backfill, run the extractor from the MacBook with a date:
 
 ```bash
 cd ~/Documents/Solar
-python3 tuya_power_extractor.py
-```
-
-To extract a specific date instead:
-
-```bash
-python3 tuya_power_extractor.py --date YYYY-MM-DD
-```
-
-For example:
-
-```bash
 python3 tuya_power_extractor.py --date 2026-10-09
 ```
 
@@ -1146,10 +1194,16 @@ Important limitations:
 # Go to project
 cd ~/Documents/Solar
 
-# Download yesterday's complete day (default)
-python3 tuya_power_extractor.py
+# View the mini's extractor schedule
+ssh piholeadmin@192.168.1.37
+systemctl list-timers --all --no-pager | grep solar-tuya
 
-# Or download a specific day
+# Start an extra catch-up run on the mini
+sudo systemctl start solar-tuya-extractor.service
+exit
+
+# Backfill a specific day from the MacBook
+cd ~/Documents/Solar
 python3 tuya_power_extractor.py --date YYYY-MM-DD
 
 # Rebuild analysis

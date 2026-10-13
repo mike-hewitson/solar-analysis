@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Daily Tuya smart-meter extractor -> Solar database.
+"""Tuya smart-meter extractor -> Solar database.
 
 Usage:
+    python3 tuya_power_extractor.py
     python3 tuya_power_extractor.py --date 2026-09-29
 
-Reads Tuya credentials and database path from config.ini in this directory.
+Without arguments, resumes from its saved checkpoint and catches up recent
+readings. --date fetches one complete SAST day for historical backfills.
+Reads Tuya credentials and database settings from config.ini in this directory.
 """
 
 import argparse
 import configparser
 import csv
+import os
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -36,6 +41,8 @@ TZ = ZoneInfo("Africa/Johannesburg")
 PAGE_SIZE = 20
 DEFAULT_WINDOW_MINUTES = 15
 DEFAULT_PAGINATION_DELAY = 0.25
+DEFAULT_OVERLAP_MINUTES = 10
+END_LAG_MINUTES = 5
 TIMEOUT = 30
 BASE_DELAY = 1.5
 MAX_DELAY = 30.0
@@ -106,6 +113,80 @@ def parse_date(value):
 def day_range(day):
     start = datetime.combine(day, datetime.min.time(), tzinfo=TZ)
     return start, start + timedelta(days=1)
+
+
+def load_checkpoint(connection):
+    """Return the saved catch-up endpoint, bootstrapping from the last daily run."""
+    placeholder = sql_placeholder()
+    row = connection.execute(
+        f"SELECT value FROM database_info WHERE key = {placeholder}",
+        ("tuya_extractor_checkpoint_sast",),
+    ).fetchone()
+    if row:
+        value = row[0] if not isinstance(row, dict) else row["value"]
+        return datetime.fromisoformat(value).astimezone(TZ)
+
+    # A legacy daily extraction queried through midnight after its source date.
+    rows = connection.execute(
+        """SELECT source_file FROM extraction_runs
+           WHERE status = 'success' AND source_file LIKE 'Tuya API ____-__-__'
+           ORDER BY source_file DESC"""
+    ).fetchall()
+    for item in rows:
+        source_file = item[0] if not isinstance(item, dict) else item["source_file"]
+        try:
+            day = datetime.strptime(
+                source_file.removeprefix("Tuya API "), "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            continue
+        return datetime.combine(day + timedelta(days=1), datetime_time.min, tzinfo=TZ)
+
+    raise RuntimeError(
+        "No saved Tuya checkpoint or successful daily extraction was found. "
+        "Run once with --date YYYY-MM-DD to establish the history, then use "
+        "the no-argument catch-up mode."
+    )
+
+
+def save_checkpoint(connection, endpoint):
+    """Save the exclusive endpoint after readings and run metadata succeed."""
+    placeholder = sql_placeholder()
+    connection.execute(
+        f"""INSERT INTO database_info (key, value)
+            VALUES ({placeholder}, {placeholder})
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+        ("tuya_extractor_checkpoint_sast", endpoint.isoformat()),
+    )
+
+
+def notify_failure(exc, source_name, config):
+    """Send a best-effort ntfy alert when SOLAR_NTFY_TOPIC is configured."""
+    topic = os.environ.get("SOLAR_NTFY_TOPIC", "").strip()
+    if not topic:
+        print(
+            "ntfy alert not sent: SOLAR_NTFY_TOPIC is not configured.",
+            file=sys.stderr,
+        )
+        return
+
+    message = (
+        f"Tuya extraction failed at {datetime.now(TZ).isoformat()}\n"
+        f"Database: {database_label(config['db_path'])}\n"
+        f"Run: {source_name}\n"
+        f"Error: {exc}"
+    )
+    try:
+        response = requests.post(
+            f"https://ntfy.sh/{quote(topic, safe='')}",
+            data=message.encode("utf-8"),
+            headers={"Title": "Solar Tuya extraction failed", "Priority": "4"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        print("ntfy failure alert sent.", file=sys.stderr)
+    except requests.RequestException as notify_error:
+        print(f"ntfy failure alert could not be sent: {notify_error}", file=sys.stderr)
 
 
 def to_ms(value):
@@ -395,15 +476,14 @@ def write_csv(rows, filename):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract one complete SAST day from Tuya into solar_meter.db."
+        description=(
+            "Without arguments, catch up Tuya readings from the saved checkpoint. "
+            "Use --date YYYY-MM-DD to fetch one complete SAST day."
+        )
     )
-    default_date = datetime.now(TZ).date() - timedelta(days=1)
     parser.add_argument(
-        "--date", type=parse_date, default=default_date,
-        help=(
-            "Complete SAST day, e.g. 2026-09-29 "
-            f"(default: yesterday, {default_date:%Y-%m-%d})"
-        ),
+        "--date", type=parse_date,
+        help="Fetch this complete SAST day for historical backfills.",
     )
     parser.add_argument(
         "--window-minutes", type=int, default=DEFAULT_WINDOW_MINUTES,
@@ -433,28 +513,51 @@ def main():
         config = load_config()
     except (FileNotFoundError, ValueError) as exc:
         print(f"CONFIGURATION ERROR: {exc}", file=sys.stderr)
+        notify_failure(exc, "configuration", {"db_path": None})
         sys.exit(1)
 
-    start, end = day_range(args.date)
     started_at = datetime.now(TZ).isoformat()
-    source_name = f"Tuya API {args.date}"
-
-    print("========================================")
-    print("Tuya daily solar-meter extraction")
-    print("========================================")
-    print(f"Date:       {args.date}")
-    print(f"Start:      {start}")
-    print(f"End:        {end}")
-    print(f"Config:     {CONFIG_FILE}")
-    print(f"Database:   {database_label(config['db_path'])}")
-    print(f"Window:     {args.window_minutes} minute(s)")
-    print(f"Pagination: {args.pagination_delay:.2f}s ordinary delay")
-    print(f"Rate limit: {BASE_DELAY:.2f}s initial backoff, max {MAX_DELAY:.1f}s")
-    print("========================================")
-
-    connection = connect_database(config["db_path"])
+    source_name = "Tuya API extraction"
+    connection = None
 
     try:
+        connection = connect_database(config["db_path"])
+        if args.date:
+            start, end = day_range(args.date)
+            source_name = f"Tuya API {args.date}"
+            mode_label = "Tuya daily solar-meter extraction"
+        else:
+            checkpoint = load_checkpoint(connection)
+            end = datetime.now(TZ) - timedelta(minutes=END_LAG_MINUTES)
+            if end <= checkpoint:
+                print(
+                    f"No catch-up needed: saved checkpoint {checkpoint.isoformat()} "
+                    f"is at or after the safe endpoint {end.isoformat()}."
+                )
+                return
+            start = checkpoint - timedelta(minutes=DEFAULT_OVERLAP_MINUTES)
+            source_name = (
+                f"Tuya API catch-up {start.isoformat()} to {end.isoformat()}"
+            )
+            mode_label = "Tuya catch-up solar-meter extraction"
+
+        print("========================================")
+        print(mode_label)
+        print("========================================")
+        print(f"Start:      {start}")
+        print(f"End:        {end}")
+        if not args.date:
+            print(
+                f"Checkpoint: {checkpoint} (with {DEFAULT_OVERLAP_MINUTES}-minute overlap; "
+                f"endpoint held back {END_LAG_MINUTES} minutes)"
+            )
+        print(f"Config:     {CONFIG_FILE}")
+        print(f"Database:   {database_label(config['db_path'])}")
+        print(f"Window:     {args.window_minutes} minute(s)")
+        print(f"Pagination: {args.pagination_delay:.2f}s ordinary delay")
+        print(f"Rate limit: {BASE_DELAY:.2f}s initial backoff, max {MAX_DELAY:.1f}s")
+        print("========================================")
+
         print("\nConnecting to Tuya Cloud (Central Europe)...")
         api = TuyaOpenAPI(API, config["access_id"], config["access_key"])
         api.connect()
@@ -462,7 +565,7 @@ def main():
         start_ms, end_ms = to_ms(start), to_ms(end)
 
         extraction_started = time.perf_counter()
-        print(f"\nRequesting power_a and power_b together for {args.date}...")
+        print("\nRequesting power_a and power_b together...")
         readings = fetch_all(
             api, config["device_id"], ["power_a", "power_b"], start_ms, end_ms,
             args.window_minutes, args.pagination_delay,
@@ -485,8 +588,14 @@ def main():
         record_run(
             connection, source_name, started_at, completed_at,
             len(rows), inserted, updated, 0, "success",
-            "Direct Tuya API extraction.",
+            (
+                "Direct Tuya API daily extraction."
+                if args.date else
+                f"Catch-up extraction; saved endpoint {end.isoformat()}."
+            ),
         )
+        if not args.date:
+            save_checkpoint(connection, end)
         connection.commit()
 
         if args.output_csv:
@@ -533,20 +642,24 @@ def main():
         print("========================================")
 
     except Exception as exc:
-        connection.rollback()
-        completed_at = datetime.now(TZ).isoformat()
-        try:
-            record_run(
-                connection, source_name, started_at, completed_at,
-                0, 0, 0, 0, "failed", str(exc),
-            )
-            connection.commit()
-        except Exception:
+        if connection is not None:
             connection.rollback()
+        completed_at = datetime.now(TZ).isoformat()
+        if connection is not None:
+            try:
+                record_run(
+                    connection, source_name, started_at, completed_at,
+                    0, 0, 0, 0, "failed", str(exc),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
         print(f"\nERROR: {exc}", file=sys.stderr)
+        notify_failure(exc, source_name, config)
         sys.exit(1)
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 if __name__ == "__main__":
