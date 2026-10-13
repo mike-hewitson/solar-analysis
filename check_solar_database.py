@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-import sqlite3
-from pathlib import Path
+from solar_db import connect_database, database_backend, database_label
 
-DB = Path(__file__).resolve().parent / "solar_meter.db"
-
-con = sqlite3.connect(DB)
+con = connect_database()
 
 print("========================================")
 print("Solar database integrity check")
 print("========================================")
-print(f"Database: {DB}")
+print(f"Database: {database_label()}")
 
 # Overall range/count
 row = con.execute("""
@@ -40,7 +37,7 @@ duplicates = con.execute("""
 print(f"Duplicate timestamps: {duplicates}")
 
 # Daily coverage
-print("\nDaily coverage:")
+print("\nDaily coverage (most recent 14 days):")
 print("-" * 78)
 
 daily = con.execute("""
@@ -53,8 +50,10 @@ daily = con.execute("""
         MAX(timestamp_sast) AS last_reading
     FROM meter_readings
     GROUP BY reading_date
-    ORDER BY reading_date
+    ORDER BY reading_date DESC
+    LIMIT 14
 """).fetchall()
+daily.reverse()
 
 print(
     f"{'Date':<12} {'Rows':>7} {'A':>7} {'B':>7} "
@@ -71,7 +70,13 @@ for r in daily:
 print("\nLargest timestamp gaps:")
 print("-" * 78)
 
-gaps = con.execute("""
+if database_backend() in {"postgres", "postgresql"}:
+    gap_seconds = "EXTRACT(EPOCH FROM (timestamp_sast::timestamp - previous::timestamp))"
+    rounded_gap = f"ROUND(({gap_seconds})::numeric, 3)"
+else:
+    gap_seconds = "(julianday(timestamp_sast) - julianday(previous)) * 86400"
+    rounded_gap = f"ROUND(({gap_seconds}), 3)"
+gaps = con.execute(f"""
     WITH ordered AS (
         SELECT
             timestamp_sast,
@@ -81,10 +86,7 @@ gaps = con.execute("""
     SELECT
         previous,
         timestamp_sast,
-        ROUND(
-            (julianday(timestamp_sast) - julianday(previous)) * 86400,
-            3
-        ) AS gap_seconds
+        {rounded_gap} AS gap_seconds
     FROM ordered
     WHERE previous IS NOT NULL
     ORDER BY gap_seconds DESC

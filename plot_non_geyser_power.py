@@ -13,14 +13,14 @@ No Tuya API calls or data extraction are performed.
 """
 
 import argparse
-import sqlite3
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from solar_db import connect_database, database_label, sql_placeholder
 
 
 TZ = ZoneInfo("Africa/Johannesburg")
@@ -32,7 +32,7 @@ MAX_INTEGRATION_GAP_SECONDS = 300.0
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Graph household, geyser and/or non-geyser power for a day using the existing SQLite database."
+        description="Graph household, geyser and/or non-geyser power for a day using the configured Solar database."
     )
     parser.add_argument(
         "--date",
@@ -43,7 +43,7 @@ def parse_args():
         "--db",
         type=Path,
         default=DEFAULT_DB,
-        help=f"SQLite database path (default: {DEFAULT_DB})",
+        help=f"SQLite path when SQLite is configured (default: {DEFAULT_DB})",
     )
     parser.add_argument(
         "--output-dir",
@@ -77,75 +77,20 @@ def resolve_day(day_text):
         raise SystemExit("ERROR: --date must be in YYYY-MM-DD format, e.g. 2026-10-11.")
 
 
-def find_column(columns, candidates):
-    lookup = {column.lower(): column for column in columns}
-    for candidate in candidates:
-        if candidate.lower() in lookup:
-            return lookup[candidate.lower()]
-    return None
-
-
 def load_readings(db_path, selected_day):
-    if not db_path.exists():
-        raise SystemExit(f"ERROR: Database not found: {db_path}")
-
     try:
-        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.Error as exc:
+        connection = connect_database(db_path, readonly=True)
+    except Exception as exc:
         raise SystemExit(f"ERROR: Could not open database read-only: {exc}")
 
     try:
-        tables = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-        table_names = [row[0] for row in tables]
-        table = next((name for name in table_names if name.lower() == "meter_readings"), None)
-        if not table:
-            raise SystemExit(
-                "ERROR: Could not find the 'meter_readings' table in the database."
-            )
-
-        columns = [
-            row[1] for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
-        ]
-        timestamp_col = find_column(
-            columns, ["timestamp_sast", "timestamp", "reading_timestamp", "datetime"]
-        )
-        date_col = find_column(columns, ["reading_date", "date"])
-        total_col = find_column(columns, ["power_a_w", "Power_A_W", "power_a", "Power_A"])
-        geyser_col = find_column(columns, ["power_b_w", "Power_B_W", "power_b", "Power_B"])
-
-        missing = [
-            label for label, col in [
-                ("timestamp", timestamp_col),
-                ("total household power (Power_A)", total_col),
-                ("geyser power (Power_B)", geyser_col),
-            ] if col is None
-        ]
-        if missing:
-            raise SystemExit(
-                "ERROR: Required column(s) not found: "
-                + ", ".join(missing)
-                + f". Columns present: {', '.join(columns)}"
-            )
-
-        # Use the local calendar-date column when available, as documented by this project.
-        if date_col:
-            query = (
-                f'SELECT "{timestamp_col}", "{total_col}", "{geyser_col}" '
-                f'FROM "{table}" WHERE "{date_col}" = ? '
-                f'ORDER BY "{timestamp_col}"'
-            )
-            rows = connection.execute(query, (selected_day.isoformat(),)).fetchall()
-        else:
-            start = datetime.combine(selected_day, time.min, TZ).isoformat()
-            end = datetime.combine(selected_day + timedelta(days=1), time.min, TZ).isoformat()
-            query = (
-                f'SELECT "{timestamp_col}", "{total_col}", "{geyser_col}" '
-                f'FROM "{table}" WHERE "{timestamp_col}" >= ? AND "{timestamp_col}" < ? '
-                f'ORDER BY "{timestamp_col}"'
-            )
-            rows = connection.execute(query, (start, end)).fetchall()
+        query = f"""
+            SELECT timestamp_sast, power_a_w, power_b_w
+            FROM meter_readings
+            WHERE reading_date = {sql_placeholder()}
+            ORDER BY timestamp_sast
+        """
+        rows = connection.execute(query, (selected_day.isoformat(),)).fetchall()
         return rows
     finally:
         connection.close()
@@ -293,7 +238,7 @@ def main():
     fig.savefig(output_path, dpi=160, bbox_inches="tight")
 
     print(f"Date:                  {selected_day.isoformat()}")
-    print(f"Database:              {args.db.expanduser()}")
+    print(f"Database:              {database_label(args.db)}")
     print(f"Readings plotted:      {len(data):,}")
     print(f"Total household:       {total_kwh:.2f} kWh")
     print(f"Geyser (cleaned):      {geyser_kwh:.2f} kWh")
@@ -318,5 +263,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except sqlite3.Error as exc:
-        sys.exit(f"ERROR: SQLite database problem: {exc}")
+    except Exception as exc:
+        sys.exit(f"ERROR: Database problem: {exc}")

@@ -22,12 +22,13 @@ import argparse
 import configparser
 import csv
 import math
-import sqlite3
 from datetime import datetime
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, PathPatch
 from matplotlib.path import Path as MplPath
+
+from solar_db import connect_database, sql_placeholder
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -142,10 +143,10 @@ def fetch_complete_days(con):
 
 
 def fetch_day(con, date):
-    return con.execute("""
+    return con.execute(f"""
         SELECT timestamp_sast, total_power_w, geyser_power_w, non_geyser_power_w
         FROM v_meter_readings_clean
-        WHERE reading_date = ? ORDER BY timestamp_sast
+        WHERE reading_date = {sql_placeholder()} ORDER BY timestamp_sast
     """, (date,)).fetchall()
 
 
@@ -729,12 +730,10 @@ def main():
         pv_yields = [a.pv_yield]
 
     db_path = load_db_path(config)
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
     out_dir = SCRIPT_DIR / "solar report"
     out_dir.mkdir(exist_ok=True)
 
-    with sqlite3.connect(db_path) as con:
+    with connect_database(db_path) as con:
         dates = fetch_complete_days(con)
         if not dates:
             raise RuntimeError("No complete days available for simulation.")

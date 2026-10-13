@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Import a Tuya CSV into the solar_meter SQLite database.
+Import a Tuya CSV into the configured Solar database.
 
 Usage:
     python import_tuya_csv.py "path/to/tuya_power_since_installation.csv"
@@ -10,10 +10,11 @@ existing row rather than create duplicates.
 """
 
 import csv
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from solar_db import connect_database, database_label, sql_placeholder
 
 DB_NAME = "solar_meter.db"
 EXPECTED_COLUMNS = {"datetime_sast", "Power_A_W", "Power_B_W"}
@@ -36,7 +37,8 @@ def main():
         raise SystemExit(f"CSV file not found: {csv_path}")
 
     db_path = Path(__file__).resolve().with_name(DB_NAME)
-    conn = sqlite3.connect(db_path)
+    conn = connect_database(db_path)
+    placeholder = sql_placeholder()
 
     started = datetime.now().isoformat(timespec="seconds")
     rows_read = rows_inserted = rows_updated = rows_rejected = 0
@@ -64,15 +66,15 @@ def main():
                     power_b = parse_float(row.get("Power_B_W"))
 
                     existing = conn.execute(
-                        "SELECT id FROM meter_readings WHERE timestamp_sast = ?",
+                        f"SELECT id FROM meter_readings WHERE timestamp_sast = {placeholder}",
                         (timestamp_sast,)
                     ).fetchone()
 
                     conn.execute(
-                        """
+                        f"""
                         INSERT INTO meter_readings
                             (timestamp_sast, reading_date, power_a_w, power_b_w, source_file)
-                        VALUES (?, ?, ?, ?, ?)
+                        VALUES ({', '.join([placeholder] * 5)})
                         ON CONFLICT(timestamp_sast) DO UPDATE SET
                             reading_date=excluded.reading_date,
                             power_a_w=excluded.power_a_w,
@@ -93,11 +95,11 @@ def main():
         completed = datetime.now().isoformat(timespec="seconds")
 
         conn.execute(
-            """
+            f"""
             INSERT INTO extraction_runs
                 (source_file, started_at, completed_at, rows_read,
                  rows_inserted, rows_updated, rows_rejected, status, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ({', '.join([placeholder] * 9)})
             """,
             (
                 csv_path.name, started, completed, rows_read,
@@ -108,7 +110,7 @@ def main():
         )
         conn.commit()
 
-        print(f"Database: {db_path}")
+        print(f"Database: {database_label(db_path)}")
         print(f"Source:   {csv_path}")
         print(f"Rows read:     {rows_read:,}")
         print(f"Rows inserted: {rows_inserted:,}")

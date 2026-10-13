@@ -3,7 +3,7 @@
 """
 Solar Step 5 — Solar Planning Analysis
 
-Uses the SQLite derived analysis to produce measured-load metrics useful for
+Uses the configured derived analysis database to produce measured-load metrics useful for
 PV, inverter and battery modelling.
 
 Complete days only are used for averaged planning metrics.
@@ -15,7 +15,7 @@ Usage:
 from pathlib import Path
 import configparser
 import csv
-import sqlite3
+from solar_db import connect_database
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -128,13 +128,10 @@ def write_csv(out_dir, windows, daily):
 def main():
     db_path = load_db_path()
 
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
-
     out_dir = SCRIPT_DIR / "solar report"
     out_dir.mkdir(exist_ok=True)
 
-    with sqlite3.connect(db_path) as con:
+    with connect_database(db_path) as con:
         daily, hourly = load_data(con)
 
     if not daily:

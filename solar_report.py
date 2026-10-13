@@ -19,10 +19,11 @@ section as the extractor and analysis scripts.
 from pathlib import Path
 import configparser
 import csv
-import sqlite3
 import statistics
 import sys
 from datetime import datetime
+
+from solar_db import connect_database
 
 import matplotlib.pyplot as plt
 
@@ -176,24 +177,22 @@ def find_peak_averages(con, windows_minutes=(1, 5, 15), top_n=3):
             if i >= window_seconds - 1:
                 end_ts = sample[0]
                 start_ts = end_ts - window_seconds + 1
-                candidates.append({
-                    "start": datetime.fromtimestamp(start_ts),
-                    "end": datetime.fromtimestamp(end_ts),
-                    "total_w": total_sum / window_seconds,
-                    "geyser_w": geyser_sum / window_seconds,
-                    "house_w": house_sum / window_seconds,
-                })
+                candidates.append((
+                    total_sum / window_seconds,
+                    start_ts,
+                    end_ts,
+                    geyser_sum / window_seconds,
+                    house_sum / window_seconds,
+                ))
 
         # Highest average windows, keeping distinct events rather than
         # reporting many overlapping windows from the same load event.
-        candidates.sort(key=lambda x: x["total_w"], reverse=True)
+        candidates.sort(key=lambda x: x[0], reverse=True)
         selected = []
 
         for candidate in candidates:
             if any(
-                abs(
-                    (candidate["start"] - chosen["start"]).total_seconds()
-                ) < window_seconds
+                abs(candidate[1] - chosen[1]) < window_seconds
                 for chosen in selected
             ):
                 continue
@@ -203,7 +202,16 @@ def find_peak_averages(con, windows_minutes=(1, 5, 15), top_n=3):
             if len(selected) >= top_n:
                 break
 
-        results[window_minutes] = selected
+        results[window_minutes] = [
+            {
+                "start": datetime.fromtimestamp(candidate[1]),
+                "end": datetime.fromtimestamp(candidate[2]),
+                "total_w": candidate[0],
+                "geyser_w": candidate[3],
+                "house_w": candidate[4],
+            }
+            for candidate in selected
+        ]
 
     return results
 
@@ -415,13 +423,10 @@ def print_report(daily, hourly, peak_averages):
 def main():
     db_path = load_db_path()
 
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
-
     out_dir = SCRIPT_DIR / "solar report"
     out_dir.mkdir(exist_ok=True)
 
-    with sqlite3.connect(db_path) as con:
+    with connect_database(db_path) as con:
         daily, hourly = fetch_data(con)
         peak_averages = find_peak_averages(con)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daily Tuya smart-meter extractor -> SQLite.
+"""Daily Tuya smart-meter extractor -> Solar database.
 
 Usage:
     python3 tuya_power_extractor.py --date 2026-09-29
@@ -10,7 +10,6 @@ Reads Tuya credentials and database path from config.ini in this directory.
 import argparse
 import configparser
 import csv
-import sqlite3
 import sys
 import time
 from collections import defaultdict
@@ -19,6 +18,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+from solar_db import (
+    connect_database as open_database,
+    database_label,
+    sql_placeholder,
+)
 
 try:
     from tuya_connector import TuyaOpenAPI
@@ -320,28 +324,25 @@ def combine(power_a, power_b):
 
 
 def connect_database(db_path):
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
-    connection = sqlite3.connect(db_path)
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+    return open_database(db_path)
 
 
 def store_readings(connection, rows, source_name):
     inserted = updated = 0
+    placeholder = sql_placeholder()
 
     for row in rows:
         timestamp = row["timestamp"]
         existing = connection.execute(
-            "SELECT 1 FROM meter_readings WHERE timestamp_sast = ?",
+            f"SELECT 1 FROM meter_readings WHERE timestamp_sast = {placeholder}",
             (timestamp,),
         ).fetchone()
 
         connection.execute(
-            """
+            f"""
             INSERT INTO meter_readings
                 (timestamp_sast, reading_date, power_a_w, power_b_w, source_file)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ({', '.join([placeholder] * 5)})
             ON CONFLICT(timestamp_sast) DO UPDATE SET
                 power_a_w = excluded.power_a_w,
                 power_b_w = excluded.power_b_w,
@@ -367,12 +368,13 @@ def store_readings(connection, rows, source_name):
 def record_run(connection, source_name, started_at, completed_at,
                rows_read, rows_inserted, rows_updated, rows_rejected,
                status, notes):
+    placeholder = sql_placeholder()
     connection.execute(
-        """
+        f"""
         INSERT INTO extraction_runs
             (source_file, started_at, completed_at, rows_read, rows_inserted,
              rows_updated, rows_rejected, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES ({', '.join([placeholder] * 9)})
         """,
         (source_name, started_at, completed_at, rows_read, rows_inserted,
          rows_updated, rows_rejected, status, notes),
@@ -444,7 +446,7 @@ def main():
     print(f"Start:      {start}")
     print(f"End:        {end}")
     print(f"Config:     {CONFIG_FILE}")
-    print(f"Database:   {config['db_path']}")
+    print(f"Database:   {database_label(config['db_path'])}")
     print(f"Window:     {args.window_minutes} minute(s)")
     print(f"Pagination: {args.pagination_delay:.2f}s ordinary delay")
     print(f"Rate limit: {BASE_DELAY:.2f}s initial backoff, max {MAX_DELAY:.1f}s")
@@ -472,7 +474,7 @@ def main():
         rows = combine(power_a, power_b)
         combine_seconds = time.perf_counter() - combine_started
 
-        print("\nStoring readings in SQLite...")
+        print("\nStoring readings in the Solar database...")
         db_started = time.perf_counter()
         inserted, updated = store_readings(
             connection, rows, source_name
@@ -483,7 +485,7 @@ def main():
         record_run(
             connection, source_name, started_at, completed_at,
             len(rows), inserted, updated, 0, "success",
-            "Direct Tuya API extraction to SQLite.",
+            "Direct Tuya API extraction.",
         )
         connection.commit()
 
@@ -525,7 +527,7 @@ def main():
         print(f"Rows inserted:    {inserted}")
         print(f"Rows updated:     {updated}")
         print("Rows rejected:    0")
-        print(f"Database:         {config['db_path']}")
+        print(f"Database:         {database_label(config['db_path'])}")
         if args.output_csv:
             print(f"CSV:              {output_csv}")
         print("========================================")

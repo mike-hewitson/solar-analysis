@@ -28,7 +28,6 @@ import configparser
 import csv
 import json
 import math
-import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,6 +37,8 @@ import requests
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, PathPatch
 from matplotlib.path import Path as MplPath
+
+from solar_db import connect_database
 
 
 PVGIS_URL = "https://re.jrc.ec.europa.eu/api/v5_3/seriescalc"
@@ -107,7 +108,7 @@ def parse_args(solar_defaults):
     p.add_argument("--year", type=int, default=2023,
                    help="Historical PVGIS year to simulate (default 2023)")
     p.add_argument("--db", default=None,
-                   help="SQLite database path")
+                   help="SQLite database path when SQLite is configured")
     p.add_argument("--pv-cache", default=None,
                    help="Optional directory for cached PVGIS JSON files")
     p.add_argument("--output-dir", default="solar report/pvgis",
@@ -194,8 +195,7 @@ def pvgis_hourly(data):
 
 
 def load_complete_measured_day(db_path):
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = connect_database(db_path, named_rows=True)
 
     rows = conn.execute("""
         SELECT timestamp_sast, reading_date, power_a_w, power_b_w
@@ -335,8 +335,7 @@ def load_daily_projection(db_path):
     The simulation year may differ from the projection year, so the
     projection is indexed by month/day.
     """
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect_database(db_path, named_rows=True) as conn:
         rows = conn.execute(f"""
             SELECT projection_date, month, day, scaling_factor,
                    total_energy_kwh, geyser_energy_kwh, non_geyser_energy_kwh

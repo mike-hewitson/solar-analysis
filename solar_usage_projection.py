@@ -21,8 +21,9 @@ from pathlib import Path
 import calendar
 import configparser
 import csv
-import sqlite3
 import statistics
+
+from solar_db import connect_database, database_label, sql_placeholder
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -178,7 +179,7 @@ def calculate_complete_day_average(db_path):
     in daily_load_summary.
     """
 
-    with sqlite3.connect(db_path) as con:
+    with connect_database(db_path) as con:
         rows = con.execute("""
             SELECT
                 reading_date,
@@ -352,12 +353,12 @@ def verify_monthly_totals(projection, monthly):
 
 def save_daily_projection_to_database(db_path, projection):
     """
-    Save the daily projection to a dedicated SQLite table.
+    Save the daily projection to the configured Solar database.
 
     Measured Tuya data and the existing daily_load_summary table are
     left untouched.
     """
-    with sqlite3.connect(db_path) as con:
+    with connect_database(db_path) as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS daily_load_projection (
                 projection_date TEXT PRIMARY KEY,
@@ -370,8 +371,9 @@ def save_daily_projection_to_database(db_path, projection):
             )
         """)
 
-        con.executemany("""
-            INSERT OR REPLACE INTO daily_load_projection (
+        placeholder = sql_placeholder()
+        con.cursor().executemany(f"""
+            INSERT INTO daily_load_projection (
                 projection_date,
                 month,
                 day,
@@ -380,7 +382,14 @@ def save_daily_projection_to_database(db_path, projection):
                 geyser_energy_kwh,
                 non_geyser_energy_kwh
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES ({', '.join([placeholder] * 7)})
+            ON CONFLICT (projection_date) DO UPDATE SET
+                month = EXCLUDED.month,
+                day = EXCLUDED.day,
+                scaling_factor = EXCLUDED.scaling_factor,
+                total_energy_kwh = EXCLUDED.total_energy_kwh,
+                geyser_energy_kwh = EXCLUDED.geyser_energy_kwh,
+                non_geyser_energy_kwh = EXCLUDED.non_geyser_energy_kwh
         """, [
             (
                 row["date"],
@@ -400,7 +409,7 @@ def save_daily_projection_to_database(db_path, projection):
     print("=" * 60)
     print("DAILY PROJECTION SAVED")
     print("=" * 60)
-    print(f"Database: {db_path}")
+    print(f"Database: {database_label(db_path)}")
     print("Table:    daily_load_projection")
     print(f"Rows:     {len(projection)}")
 
@@ -434,11 +443,6 @@ def main():
     # --------------------------------------------------------------
 
     db_path = load_db_path()
-
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"Database not found: {db_path}"
-        )
 
     result = calculate_complete_day_average(db_path)
 

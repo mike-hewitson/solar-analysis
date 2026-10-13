@@ -16,8 +16,13 @@ The script:
 """
 
 import configparser
-import sqlite3
 from pathlib import Path
+
+from solar_db import (
+    connect_database as open_database,
+    database_backend,
+    database_label,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "config.ini"
@@ -49,48 +54,59 @@ def load_config():
 
 
 def connect(db_path):
-    if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
-
-    con = sqlite3.connect(db_path)
-    con.execute("PRAGMA foreign_keys = ON")
-    return con
+    return open_database(db_path)
 
 
 def create_schema(con, noise_threshold):
-    con.execute("DROP VIEW IF EXISTS v_meter_readings_clean")
-    con.execute("DROP TABLE IF EXISTS hourly_load_profile")
-    con.execute("DROP TABLE IF EXISTS daily_load_summary")
-
-    # SQLite does not permit a normal bound parameter in a persistent view
-    # definition, so the configured threshold is safely embedded as a number.
     threshold = float(noise_threshold)
+    is_postgres = database_backend() in {"postgres", "postgresql"}
+    timestamp_expr = "timestamp_sast::timestamp" if is_postgres else "timestamp_sast"
+    greatest = "GREATEST" if is_postgres else "MAX"
+    power_average = (
+        "((total_power_w + next_power_a_w)::double precision / 2.0)"
+        if is_postgres
+        else "((total_power_w + next_power_a_w) / 2.0)"
+    )
+    geyser_start_power = "geyser_power_w::double precision" if is_postgres else "geyser_power_w"
+    next_geyser_power = "next_power_b_w::double precision" if is_postgres else "next_power_b_w"
+    energy_zero = "0.0::double precision" if is_postgres else "0.0"
+    gap_seconds = (
+        "EXTRACT(EPOCH FROM (next_timestamp - timestamp_value))"
+        if is_postgres
+        else "(julianday(next_timestamp) - julianday(timestamp_value)) * 86400.0"
+    )
+    if not is_postgres:
+        con.execute("DROP VIEW IF EXISTS v_meter_readings_clean")
+    create_view = "CREATE OR REPLACE VIEW" if is_postgres else "CREATE VIEW"
+    meter_table = "public.meter_readings" if is_postgres else "meter_readings"
 
     con.execute(f"""
-    CREATE VIEW v_meter_readings_clean AS
+    {create_view} v_meter_readings_clean AS
     WITH ordered AS (
         SELECT
             id,
             timestamp_sast,
+            {timestamp_expr} AS timestamp_value,
             reading_date,
             power_a_w,
             power_b_w,
-            LEAD(timestamp_sast) OVER (ORDER BY timestamp_sast) AS next_timestamp,
+            LEAD({timestamp_expr}) OVER (ORDER BY timestamp_sast) AS next_timestamp,
             LEAD(power_a_w) OVER (ORDER BY timestamp_sast) AS next_power_a_w,
             LEAD(power_b_w) OVER (ORDER BY timestamp_sast) AS next_power_b_w
-        FROM meter_readings
+        FROM {meter_table}
     ),
     cleaned AS (
         SELECT
             id,
             timestamp_sast,
+            timestamp_value,
             reading_date,
             power_a_w AS total_power_w,
             CASE
                 WHEN power_b_w IS NULL THEN NULL
                 WHEN ABS(power_b_w) < {threshold}
                     THEN 0.0
-                ELSE MAX(power_b_w, 0.0)
+                ELSE {greatest}(power_b_w, 0.0)
             END AS geyser_power_w,
             next_timestamp,
             next_power_a_w,
@@ -106,44 +122,44 @@ def create_schema(con, noise_threshold):
         CASE
             WHEN total_power_w IS NULL THEN NULL
             WHEN geyser_power_w IS NULL THEN total_power_w
-            ELSE MAX(total_power_w - geyser_power_w, 0.0)
+            ELSE {greatest}(total_power_w - geyser_power_w, 0.0)
         END AS non_geyser_power_w,
 
         CASE
             WHEN next_timestamp IS NULL
-              OR julianday(next_timestamp) <= julianday(timestamp_sast)
-              OR (julianday(next_timestamp) - julianday(timestamp_sast)) * 86400.0 > 300.0
+              OR next_timestamp <= timestamp_value
+              OR {gap_seconds} > 300.0
               OR total_power_w IS NULL OR next_power_a_w IS NULL
             THEN NULL
-            ELSE ((total_power_w + next_power_a_w) / 2.0)
-                 * ((julianday(next_timestamp) - julianday(timestamp_sast)) * 86400.0)
+            ELSE {power_average}
+                 * ({gap_seconds})
                  / 3600000.0
         END AS total_energy_kwh,
 
         CASE
             WHEN next_timestamp IS NULL
-              OR julianday(next_timestamp) <= julianday(timestamp_sast)
-              OR (julianday(next_timestamp) - julianday(timestamp_sast)) * 86400.0 > 300.0
+              OR next_timestamp <= timestamp_value
+              OR {gap_seconds} > 300.0
               OR geyser_power_w IS NULL OR next_power_b_w IS NULL
             THEN NULL
             ELSE (
                 (
-                    geyser_power_w +
+                    {geyser_start_power} +
                     CASE
                         WHEN ABS(next_power_b_w) < {threshold}
-                            THEN 0.0
-                        ELSE MAX(next_power_b_w, 0.0)
+                            THEN {energy_zero}
+                        ELSE {greatest}({next_geyser_power}, 0.0)
                     END
                 ) / 2.0
             )
-            * ((julianday(next_timestamp) - julianday(timestamp_sast)) * 86400.0)
+            * ({gap_seconds})
             / 3600000.0
         END AS geyser_energy_kwh
     FROM cleaned;
     """)
 
     con.execute("""
-    CREATE TABLE daily_load_summary (
+    CREATE TABLE IF NOT EXISTS daily_load_summary (
         reading_date TEXT PRIMARY KEY,
         reading_count INTEGER NOT NULL,
         first_timestamp TEXT NOT NULL,
@@ -162,7 +178,7 @@ def create_schema(con, noise_threshold):
     """)
 
     con.execute("""
-    CREATE TABLE hourly_load_profile (
+    CREATE TABLE IF NOT EXISTS hourly_load_profile (
         hour INTEGER PRIMARY KEY,
         complete_days INTEGER NOT NULL,
         avg_total_power_w REAL,
@@ -177,7 +193,14 @@ def create_schema(con, noise_threshold):
 
 
 def populate_daily(con):
-    con.execute("""
+    span_hours = (
+        "EXTRACT(EPOCH FROM (MAX(timestamp_sast::timestamp) - "
+        "MIN(timestamp_sast::timestamp))) / 3600.0"
+        if database_backend() in {"postgres", "postgresql"}
+        else "(julianday(MAX(timestamp_sast)) - julianday(MIN(timestamp_sast))) * 24.0"
+    )
+    con.execute("DELETE FROM daily_load_summary")
+    con.execute(f"""
     INSERT INTO daily_load_summary (
         reading_date,
         reading_count,
@@ -199,8 +222,7 @@ def populate_daily(con):
         COUNT(*),
         MIN(timestamp_sast),
         MAX(timestamp_sast),
-        (julianday(MAX(timestamp_sast)) -
-         julianday(MIN(timestamp_sast))) * 24.0,
+        {span_hours},
 
         CASE
             WHEN MIN(timestamp_sast) <= reading_date || ' 00:05:00'
@@ -301,7 +323,7 @@ def print_summary(con, threshold):
     print("\n========================================")
     print("Step 3 analysis layer")
     print("========================================")
-    print(f"Database:                 {con.execute('PRAGMA database_list').fetchone()[2]}")
+    print(f"Database:                 {database_label()}")
     print(f"Geyser noise threshold:   {threshold:.1f} W")
 
     print("\nDaily summary:")

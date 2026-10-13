@@ -63,7 +63,7 @@ def run_case(base_script, year, battery, root, solar_defaults, db_path, pv_cache
     for ts, p in east.items():
         pv[(ts.date(), ts.hour)] = p + west.get(ts, 0.0)
 
-    hourly_shape = mod.load_hourly_shape(db_path)
+    hourly_shape = mod.load_complete_measured_day(db_path)
     daily_projection = mod.load_daily_projection(db_path)
     daily, annual, monthly, min_soc, max_soc = mod.simulate_year(
     pv, hourly_shape, daily_projection, a, year
@@ -137,7 +137,7 @@ def main():
           f"({solar_defaults['east_kwp']:.2f} east + {solar_defaults['west_kwp']:.2f} west)")
     print(f"Inverter:       {solar_defaults['inverter_kw']:.2f} kW")
     print(f"Reserve:        {solar_defaults['reserve_frac'] * 100:.1f}%")
-    print(f"Database:       {db_path}")
+    print(f"Database:       {mod.database_label(db_path)}")
     print(f"PV cache:       {pv_cache}")
     print(f"Battery cases:  {', '.join(f'{x:g}' for x in batteries)} kWh")
     print()
