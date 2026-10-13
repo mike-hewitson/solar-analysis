@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot non-geyser household power for one calendar day from solar_meter.db.
+Plot household power for one calendar day from the configured Solar database.
 
 Usage:
     python3 plot_non_geyser_power.py
@@ -14,7 +14,7 @@ No Tuya API calls or data extraction are performed.
 
 import argparse
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -24,8 +24,9 @@ from solar_db import connect_database, database_label, sql_placeholder
 
 
 TZ = ZoneInfo("Africa/Johannesburg")
-DEFAULT_DB = Path.home() / "Documents" / "Solar" / "solar_meter.db"
-DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "Solar" / "solar report"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_DB = SCRIPT_DIR / "solar_meter.db"
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "solar report"
 GEYSER_NOISE_THRESHOLD_W = 20.0
 MAX_INTEGRATION_GAP_SECONDS = 300.0
 

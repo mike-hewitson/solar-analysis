@@ -19,7 +19,7 @@ Tuya Smart Meter
 tuya_power_extractor.py
        │
        ▼
-solar_meter.db
+PostgreSQL: solar_meter (Ubuntu mini)
        │
        ├── raw meter readings
        │
@@ -36,7 +36,9 @@ solar_report.py
        └── CSV reports
 ```
 
-The SQLite database is the **single source of truth**.
+The live database is PostgreSQL on the Ubuntu mini. The MacBook's
+`solar_meter.db` SQLite file is retained as a migration-era fallback; it is not
+the active database used by the mini's scheduled jobs.
 
 Raw meter readings are retained. Cleaning and analysis are performed in derived
 database objects so that the original measurements are not destroyed.
@@ -56,11 +58,11 @@ The important files are:
 | File | Purpose |
 |---|---|
 | `config.ini` | Tuya credentials, database location and analysis settings |
-| `tuya_power_extractor.py` | Downloads meter readings from Tuya and stores them in SQLite |
+| `tuya_power_extractor.py` | Downloads meter readings from Tuya and stores them in the configured database |
 | `solar_analysis.py` | Builds cleaned readings, daily summaries and hourly profiles |
 | `solar_report.py` | Produces charts, CSV reports and planning summaries |
 | `plot_non_geyser_power.py` | Plots total and/or non-geyser power for a selected day from existing database readings |
-| `solar_meter.db` | SQLite database containing the meter data and derived analysis |
+| `solar_meter.db` | MacBook SQLite database retained as a fallback copy |
 | `solar report/` | Output directory created by `solar_report.py` |
 
 There may also be older extractor scripts in the folder. These are historical
@@ -244,6 +246,53 @@ sudo systemctl start solar-tuya-extractor.service
 
 Avoid starting a manual extractor run on the MacBook while a mini run is in
 progress. Both installations use the same PostgreSQL checkpoint and database.
+
+The mini runs the following daily jobs from `~/solar-health-check`, all using
+the local PostgreSQL database. Times are in `Africa/Johannesburg`:
+
+| Time | Job | Result |
+|---|---|---|
+| 22:00 | `solar-db-backup.timer` | Creates a PostgreSQL custom-format dump in `~/solar-backups/` |
+| 05:00 | `solar-health-check.timer` | Emails the database integrity and coverage report |
+| 05:05 | `solar-analysis.timer` | Rebuilds analysis tables and emails the complete output |
+| 05:10 | `solar-report.timer` | Emails report output with the three generated PNG charts attached |
+
+The health check, analysis, and report emails go through the configured Gmail
+`msmtp` account to `mike@hewitson.co.za` and `hewitson.is.me@gmail.com`. The
+report runner also sends an ntfy alert if report generation fails, any chart is
+missing, or email delivery fails. The ntfy topic is read from the mini's
+private `~/.config/solar-db-backup/ntfy.env`; the topic value is not stored in
+this README. Report output and CSV/PNG files are kept under
+`~/solar-health-check/solar report/`.
+
+Useful commands to inspect the daily jobs:
+
+```bash
+systemctl list-timers --all --no-pager | grep -E 'solar-(db-backup|health-check|analysis|report)'
+sudo systemctl status solar-health-check.service solar-analysis.service solar-report.service --no-pager -l
+sudo journalctl -u solar-health-check.service -u solar-analysis.service -u solar-report.service -n 60 --no-pager
+```
+
+The systemd timers are persistent, so a scheduled run missed while the mini is
+off is started after it returns. The Tuya extractor remains on its separate
+every-two-hours schedule.
+
+All five scheduled jobs (extractor, backup, health check, analysis and report)
+also send a successful-run ping to their individual Healthchecks.io checks.
+Systemd sends the ping only after the job command succeeds. The check-in URLs
+are stored privately on the mini in
+`~/.config/solar-heartbeats/solar.env` (mode `600`) and must not be shared or
+committed to this project. Healthchecks.io alerts are routed through the
+configured ntfy integration. The five checks were manually verified as up.
+
+Useful commands to check or start the analysis email service:
+
+```bash
+systemctl list-timers --all --no-pager | grep solar-analysis
+sudo systemctl status solar-analysis.service --no-pager -l
+sudo journalctl -u solar-analysis.service -n 40 --no-pager
+sudo systemctl start solar-analysis.service
+```
 
 ### Optionally write a CSV copy
 
@@ -541,7 +590,7 @@ Contains the complete-day hourly profile.
 ## `plot_non_geyser_power.py`
 
 This script creates a graph for one calendar day using readings already stored
-in `solar_meter.db`. The `--chart both` option plots three lines together: geyser,
+in the configured database (SQLite or PostgreSQL). The `--chart both` option plots three lines together: geyser,
 non-geyser and total household power. It does **not** contact Tuya, extract data,
 or modify the database.
 
@@ -553,28 +602,44 @@ Run from the Solar directory:
 cd ~/Documents/Solar
 ```
 
+To run this chart from the mini against its local PostgreSQL database, copy the
+script into the same directory as the analysis and report scripts:
+
+```bash
+# Run on the MacBook
+cd ~/Documents/Solar
+scp plot_non_geyser_power.py piholeadmin@192.168.1.37:~/solar-health-check/
+
+# Then run on the mini
+cd ~/solar-health-check
+./.venv/bin/python plot_non_geyser_power.py
+```
+
+The default database and output paths are relative to the script directory.
+On the mini, the PNG is saved under `~/solar-health-check/solar report/`.
+
 ### Chart non-geyser power (default)
 
 ```bash
-python3 plot_non_geyser_power.py
+./.venv/bin/python plot_non_geyser_power.py
 ```
 
 ### Chart geyser power
 
 ```bash
-python3 plot_non_geyser_power.py --chart geyser
+./.venv/bin/python plot_non_geyser_power.py --chart geyser
 ```
 
 ### Chart total household power
 
 ```bash
-python3 plot_non_geyser_power.py --chart total
+./.venv/bin/python plot_non_geyser_power.py --chart total
 ```
 
 ### Chart geyser, non-geyser and total power
 
 ```bash
-python3 plot_non_geyser_power.py --chart both
+./.venv/bin/python plot_non_geyser_power.py --chart both
 ```
 
 ### Chart a specific date
@@ -582,14 +647,14 @@ python3 plot_non_geyser_power.py --chart both
 Supply the date in `YYYY-MM-DD` format:
 
 ```bash
-python3 plot_non_geyser_power.py --date 2026-10-11
+./.venv/bin/python plot_non_geyser_power.py --date 2026-10-11
 ```
 
 Combine the date and chart selection as needed:
 
 ```bash
-python3 plot_non_geyser_power.py --date 2026-10-11 --chart both
-python3 plot_non_geyser_power.py --date 2026-10-11 --chart geyser
+./.venv/bin/python plot_non_geyser_power.py --date 2026-10-11 --chart both
+./.venv/bin/python plot_non_geyser_power.py --date 2026-10-11 --chart geyser
 ```
 
 ### Display the graph after saving
@@ -597,7 +662,7 @@ python3 plot_non_geyser_power.py --date 2026-10-11 --chart geyser
 Add `--show` to open the graph window:
 
 ```bash
-python3 plot_non_geyser_power.py --chart both --show
+./.venv/bin/python plot_non_geyser_power.py --chart both --show
 ```
 
 ### Output
@@ -605,11 +670,14 @@ python3 plot_non_geyser_power.py --chart both --show
 For `--chart both`, the graph includes geyser power, non-geyser power and total
 household power, with a legend and daily energy totals in the footer.
 
-The PNG graph is saved in:
+The PNG graph is saved in a `solar report/` folder beside the script. On the
+MacBook this is:
 
 ```text
 ~/Documents/Solar/solar report/
 ```
+
+On the mini it is `~/solar-health-check/solar report/`.
 
 The filename includes the chart type and date, for example:
 
@@ -666,7 +734,11 @@ cd ~/Documents/Solar
 python3 tuya_power_extractor.py --date 2026-10-09
 ```
 
-### Step 2 — Rebuild the analysis
+### Step 2 — Review the daily analysis email
+
+The mini rebuilds the analysis tables and emails the complete analysis output
+daily at 05:05 SAST. To rebuild the tables manually from the MacBook when
+needed:
 
 ```bash
 python3 solar_analysis.py
@@ -700,13 +772,16 @@ charts + CSV reports
 
 # 15. Database
 
-The database is:
+The live database is PostgreSQL:
 
 ```text
-solar_meter.db
+Database: solar_meter
+Host: Ubuntu mini (local jobs connect to 127.0.0.1)
+Role: solar_app
 ```
 
-It is a standard SQLite database and requires no database server.
+The MacBook's `solar_meter.db` is the SQLite copy retained after migration. The
+mini is the active collection and reporting host.
 
 The main raw table is:
 
@@ -749,28 +824,17 @@ The derived objects can safely be rebuilt from the raw data.
 
 # 16. Backups
 
-The SQLite database should be backed up periodically.
-
-Recommended:
+The mini creates a daily PostgreSQL custom-format dump at 22:00 SAST in:
 
 ```text
-solar_meter.db
+~/solar-backups/solar_meter_<UTC timestamp>.dump
 ```
 
-should be included in normal Mac/Time Machine backups.
-
-Avoid placing an actively-written SQLite database inside a synchronised
-Dropbox/iCloud/OneDrive folder if possible.
-
-A simple manual backup can be made with:
-
-```bash
-cp ~/Documents/Solar/solar_meter.db \
-   ~/Documents/Solar/solar_meter_backup.db
-```
-
-For a proper backup while the database is in use, SQLite's backup mechanism
-is preferable to simply copying the file.
+The job is `solar-db-backup.service`, scheduled by `solar-db-backup.timer`.
+Failure sends an ntfy message using the private topic configuration at
+`~/.config/solar-db-backup/ntfy.env`. AWS/S3 off-host backup is not yet
+configured. Keep the MacBook SQLite fallback and normal Mac backups until
+off-host PostgreSQL backups are established and verified.
 
 ---
 

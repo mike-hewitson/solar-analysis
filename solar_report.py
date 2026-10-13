@@ -31,26 +31,6 @@ import matplotlib.pyplot as plt
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-def load_db_path():
-    config_path = SCRIPT_DIR / "config.ini"
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    config = configparser.ConfigParser()
-    config.read(config_path)
-
-    if not config.has_option("database", "path"):
-        raise ValueError("config.ini does not contain [database] path")
-
-    db_path = Path(config.get("database", "path"))
-
-    if not db_path.is_absolute():
-        db_path = SCRIPT_DIR / db_path
-
-    return db_path
-
-
 def fetch_data(con):
     daily = con.execute("""
         SELECT
@@ -421,12 +401,10 @@ def print_report(daily, hourly, peak_averages):
 
 
 def main():
-    db_path = load_db_path()
-
     out_dir = SCRIPT_DIR / "solar report"
     out_dir.mkdir(exist_ok=True)
 
-    with connect_database(db_path) as con:
+    with connect_database() as con:
         daily, hourly = fetch_data(con)
         peak_averages = find_peak_averages(con)
 
