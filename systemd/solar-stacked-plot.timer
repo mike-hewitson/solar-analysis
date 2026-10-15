@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Solar stacked power plot after the daily plot
+
+[Timer]
+OnCalendar=*-*-* 05:20:00 Africa/Johannesburg
+Persistent=true
+Unit=solar-stacked-plot.service
+
+[Install]
+WantedBy=timers.target

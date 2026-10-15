@@ -2,6 +2,7 @@
 """Run solar_report.py and email its output with the generated charts."""
 from datetime import datetime
 from email.message import EmailMessage
+from html import escape
 from pathlib import Path
 import subprocess
 import sys
@@ -92,7 +93,16 @@ def main() -> int:
     missing = [str(path) for path in IMAGES if not path.is_file()]
     if missing:
         body.extend(["", "Expected chart image(s) not found:", *missing])
-    message.set_content("\n".join(body))
+    body_text = "\n".join(body)
+    message.set_content(body_text)
+    html_body = (
+        '<!doctype html><html><body style="margin:0;padding:16px;">'
+        '<pre style="margin:0;font-family:Menlo,Monaco,Consolas,'
+        '\'Liberation Mono\',\'Courier New\',monospace;'
+        'font-size:13px;line-height:1.35;white-space:pre;">'
+        f"{escape(body_text)}</pre></body></html>"
+    )
+    message.add_alternative(html_body, subtype="html")
 
     for path in IMAGES:
         if path.is_file():

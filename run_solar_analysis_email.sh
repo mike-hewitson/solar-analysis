@@ -18,16 +18,37 @@ else
     result="FAILED (exit ${analysis_status})"
 fi
 
-{
-    printf 'From: hewitson.is.me@gmail.com\n'
-    printf 'To: mike@hewitson.co.za\n'
-    printf 'Cc: hewitson.is.me@gmail.com\n'
-    printf 'Subject: Solar Step 3 analysis %s - %s\n' "$result" "$(date '+%Y-%m-%d')"
-    printf 'MIME-Version: 1.0\n'
-    printf 'Content-Type: text/plain; charset=UTF-8\n'
-    printf '\n'
-    cat "$body_file"
-} >"$message_file"
+if ! ./.venv/bin/python - "$body_file" "$result" "$message_file" <<'PYMAIL'
+from datetime import datetime
+from email.message import EmailMessage
+from html import escape
+from pathlib import Path
+import sys
+
+body_path, result, message_path = sys.argv[1:]
+report = Path(body_path).read_text(encoding="utf-8", errors="replace")
+message = EmailMessage()
+message["From"] = "hewitson.is.me@gmail.com"
+message["To"] = "mike@hewitson.co.za"
+message["Cc"] = "hewitson.is.me@gmail.com"
+now = datetime.now().astimezone()
+message["Subject"] = f"Solar Step 3 analysis {result} - {now:%Y-%m-%d}"
+plain_text = report or "(No analysis output)\n"
+message.set_content(plain_text)
+html_body = (
+    '<!doctype html><html><body style="margin:0;padding:16px;">'
+    '<pre style="margin:0;font-family:Menlo,Monaco,Consolas,'
+    '\'Liberation Mono\',\'Courier New\',monospace;'
+    'font-size:13px;line-height:1.35;white-space:pre;">'
+    f"{escape(plain_text)}</pre></body></html>"
+)
+message.add_alternative(html_body, subtype="html")
+Path(message_path).write_bytes(message.as_bytes())
+PYMAIL
+then
+    echo "Could not construct the Solar analysis email." >&2
+    exit 1
+fi
 
 if /usr/bin/msmtp -a gmail -t <"$message_file"; then
     mail_status=0

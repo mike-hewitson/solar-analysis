@@ -180,38 +180,72 @@ def main():
     )
 
     fig, ax = plt.subplots(figsize=(13, 6.5))
-    if args.chart in ("non-geyser", "both"):
-        ax.plot(
-            times, [value / 1000.0 for value in non_geyser_w],
-            linewidth=1.0, label="Non-geyser power"
-        )
-    if args.chart in ("geyser", "both"):
-        ax.plot(
-            times, [value / 1000.0 for value in geyser_w],
-            linewidth=1.0, label="Geyser power"
-        )
-    if args.chart in ("total", "both"):
-        ax.plot(
-            times, [value / 1000.0 for value in total_w],
-            linewidth=1.0, label="Total household power"
-        )
+    if args.chart == "both":
+        # Average readings within each minute and stack the two components.
+        # Missing minutes are left blank so data gaps remain visible.
+        minutes = {minute: {"geyser": [], "non_geyser": []}
+                   for minute in range(24 * 60)}
+        for dt, geyser, non_geyser in zip(times, geyser_w, non_geyser_w):
+            minute = dt.hour * 60 + dt.minute
+            minutes[minute]["geyser"].append(geyser / 1000.0)
+            minutes[minute]["non_geyser"].append(non_geyser / 1000.0)
+        minute_indices = [
+            minute for minute in range(24 * 60)
+            if minutes[minute]["geyser"]
+        ]
+        geyser_avg = [
+            sum(minutes[minute]["geyser"]) / len(minutes[minute]["geyser"])
+            for minute in minute_indices
+        ]
+        non_geyser_avg = [
+            sum(minutes[minute]["non_geyser"]) / len(minutes[minute]["non_geyser"])
+            for minute in minute_indices
+        ]
+        ax.bar(minute_indices, non_geyser_avg, width=0.9,
+               edgecolor="white", linewidth=0.25,
+               label="Non-geyser power")
+        ax.bar(minute_indices, geyser_avg, width=0.9, bottom=non_geyser_avg,
+               edgecolor="white", linewidth=0.25,
+               label="Geyser power")
+        total_minute_avg = [
+            non_geyser + geyser
+            for non_geyser, geyser in zip(non_geyser_avg, geyser_avg)
+        ]
+        ax.plot(minute_indices, total_minute_avg, color="#222222", linewidth=0.6,
+                label="Total household power")
+        hour_ticks = list(range(0, 24 * 60, 60))
+        ax.set_xticks(hour_ticks, [f"{hour:02d}:00" for hour in range(24)],
+                      rotation=45)
+        ax.set_xlim(-1, 24 * 60)
+    else:
+        if args.chart == "non-geyser":
+            ax.plot(times, [value / 1000.0 for value in non_geyser_w],
+                    linewidth=1.0, label="Non-geyser power")
+        elif args.chart == "geyser":
+            ax.plot(times, [value / 1000.0 for value in geyser_w],
+                    linewidth=1.0, label="Geyser power")
+        elif args.chart == "total":
+            ax.plot(times, [value / 1000.0 for value in total_w],
+                    linewidth=1.0, label="Total household power")
     chart_titles = {
         "non-geyser": "Non-geyser household power",
         "geyser": "Geyser power",
         "total": "Total household power",
-        "both": "Geyser, non-geyser and total household power",
+        "both": "Per-minute average household power (stacked)",
     }
     ax.set_title(
         f"{chart_titles[args.chart]} — {selected_day.strftime('%A, %d %B %Y')}"
     )
-    ax.set_xlabel("Time (South African time)")
+    ax.set_xlabel("Hour (South African time)" if args.chart == "both"
+                  else "Time (South African time)")
     ax.set_ylabel("Power (kW)")
-    ax.set_xlim(
-        datetime.combine(selected_day, time.min, TZ),
-        datetime.combine(selected_day + timedelta(days=1), time.min, TZ),
-    )
-    ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 2), tz=TZ))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=TZ))
+    if args.chart != "both":
+        ax.set_xlim(
+            datetime.combine(selected_day, time.min, TZ),
+            datetime.combine(selected_day + timedelta(days=1), time.min, TZ),
+        )
+        ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 2), tz=TZ))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=TZ))
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right")
 

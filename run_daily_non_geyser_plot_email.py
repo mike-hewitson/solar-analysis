@@ -2,6 +2,7 @@
 """Generate yesterday's non-geyser chart and email it as an attachment."""
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import subprocess
@@ -69,7 +70,16 @@ def main() -> int:
     ]
     if not image_created:
         body.extend(["", f"Expected graph was not created: {image}"])
-    message.set_content("\n".join(body))
+    body_text = "\n".join(body)
+    message.set_content(body_text)
+    html_body = (
+        '<!doctype html><html><body style="margin:0;padding:16px;">'
+        '<pre style="margin:0;font-family:Menlo,Monaco,Consolas,'
+        '\'Liberation Mono\',\'Courier New\',monospace;'
+        'font-size:13px;line-height:1.35;white-space:pre;">'
+        f"{escape(body_text)}</pre></body></html>"
+    )
+    message.add_alternative(html_body, subtype="html")
 
     if image_created:
         message.add_attachment(

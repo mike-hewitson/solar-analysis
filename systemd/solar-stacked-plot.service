@@ -1,0 +1,11 @@
+[Unit]
+Description=Solar daily stacked power plot email
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=piholeadmin
+Group=piholeadmin
+WorkingDirectory=/home/piholeadmin/solar-health-check
+ExecStart=/home/piholeadmin/solar-health-check/.venv/bin/python /home/piholeadmin/solar-health-check/run_daily_stacked_plot_email.py
