@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from solar_db import connect_database, database_label, sql_placeholder
+from solar_chart_colors import GEYSER, NON_GEYSER, TOTAL
 
 
 TZ = ZoneInfo("Africa/Johannesburg")
@@ -202,16 +203,18 @@ def main():
             for minute in minute_indices
         ]
         ax.bar(minute_indices, non_geyser_avg, width=0.9,
+               color=NON_GEYSER,
                edgecolor="white", linewidth=0.25,
                label="Non-geyser power")
         ax.bar(minute_indices, geyser_avg, width=0.9, bottom=non_geyser_avg,
+               color=GEYSER,
                edgecolor="white", linewidth=0.25,
                label="Geyser power")
         total_minute_avg = [
             non_geyser + geyser
             for non_geyser, geyser in zip(non_geyser_avg, geyser_avg)
         ]
-        ax.plot(minute_indices, total_minute_avg, color="#222222", linewidth=0.6,
+        ax.plot(minute_indices, total_minute_avg, color=TOTAL, linewidth=1.2,
                 label="Total household power")
         hour_ticks = list(range(0, 24 * 60, 60))
         ax.set_xticks(hour_ticks, [f"{hour:02d}:00" for hour in range(24)],
@@ -220,13 +223,13 @@ def main():
     else:
         if args.chart == "non-geyser":
             ax.plot(times, [value / 1000.0 for value in non_geyser_w],
-                    linewidth=1.0, label="Non-geyser power")
+                    color=NON_GEYSER, linewidth=1.0, label="Non-geyser power")
         elif args.chart == "geyser":
             ax.plot(times, [value / 1000.0 for value in geyser_w],
-                    linewidth=1.0, label="Geyser power")
+                    color=GEYSER, linewidth=1.0, label="Geyser power")
         elif args.chart == "total":
             ax.plot(times, [value / 1000.0 for value in total_w],
-                    linewidth=1.0, label="Total household power")
+                    color=TOTAL, linewidth=1.0, label="Total household power")
     chart_titles = {
         "non-geyser": "Non-geyser household power",
         "geyser": "Geyser power",

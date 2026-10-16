@@ -24,6 +24,7 @@ import sys
 from datetime import datetime
 
 from solar_db import connect_database
+from solar_chart_colors import GEYSER, NON_GEYSER, TOTAL
 
 import matplotlib.pyplot as plt
 
@@ -238,8 +239,8 @@ def make_daily_chart(out_dir, daily):
 
     fig, ax = plt.subplots(figsize=(11, 6))
 
-    ax.bar(x, geyser, label="Geyser")
-    ax.bar(x, non_geyser, bottom=geyser, label="Non-geyser")
+    ax.bar(x, non_geyser, color=NON_GEYSER, label="Non-geyser")
+    ax.bar(x, geyser, bottom=non_geyser, color=GEYSER, label="Geyser")
 
     for i, row in enumerate(daily):
         if row[5]:
@@ -277,9 +278,9 @@ def make_hourly_chart(out_dir, hourly):
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    ax.plot(hours, total, marker="o", label="Total")
-    ax.plot(hours, geyser, marker="o", label="Geyser")
-    ax.plot(hours, non_geyser, marker="o", label="Non-geyser")
+    ax.plot(hours, total, marker="o", color=TOTAL, label="Total")
+    ax.plot(hours, geyser, marker="o", color=GEYSER, label="Geyser")
+    ax.plot(hours, non_geyser, marker="o", color=NON_GEYSER, label="Non-geyser")
 
     ax.set_title("Average Hourly Load — Complete Days Only")
     ax.set_xlabel("Time of day")
@@ -307,8 +308,8 @@ def make_hourly_energy_chart(out_dir, hourly):
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    ax.bar(x, geyser, label="Geyser")
-    ax.bar(x, non_geyser, bottom=geyser, label="Non-geyser")
+    ax.bar(x, non_geyser, color=NON_GEYSER, label="Non-geyser")
+    ax.bar(x, geyser, bottom=non_geyser, color=GEYSER, label="Geyser")
 
     ax.set_title("Average Hourly Energy — Complete Days Only")
     ax.set_xlabel("Time of day")
