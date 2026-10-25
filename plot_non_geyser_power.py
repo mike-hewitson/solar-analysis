@@ -210,12 +210,6 @@ def main():
                color=GEYSER,
                edgecolor="white", linewidth=0.25,
                label="Geyser power")
-        total_minute_avg = [
-            non_geyser + geyser
-            for non_geyser, geyser in zip(non_geyser_avg, geyser_avg)
-        ]
-        ax.plot(minute_indices, total_minute_avg, color=TOTAL, linewidth=1.2,
-                label="Total household power")
         hour_ticks = list(range(0, 24 * 60, 60))
         ax.set_xticks(hour_ticks, [f"{hour:02d}:00" for hour in range(24)],
                       rotation=45)

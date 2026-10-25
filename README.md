@@ -255,7 +255,7 @@ the local PostgreSQL database. Times are in `Africa/Johannesburg`:
 | 22:00 | `solar-db-backup.timer` | Creates a PostgreSQL custom-format dump in `~/solar-backups/` |
 | 05:00 | `solar-health-check.timer` | Emails the database integrity and coverage report |
 | 05:05 | `solar-analysis.timer` | Rebuilds analysis tables and emails the complete output |
-| 05:10 | `solar-report.timer` | Emails report output with the three generated PNG charts attached |
+| 05:10 | `solar-report.timer` | Emails report output with the two generated PNG charts attached |
 
 The health check, analysis, and report emails go through the configured Gmail
 `msmtp` account to `mike@hewitson.co.za` and `hewitson.is.me@gmail.com`. The
@@ -278,12 +278,25 @@ off is started after it returns. The Tuya extractor remains on its separate
 every-two-hours schedule.
 
 All five scheduled jobs (extractor, backup, health check, analysis and report)
-also send a successful-run ping to their individual Healthchecks.io checks.
-Systemd sends the ping only after the job command succeeds. The check-in URLs
-are stored privately on the mini in
+send a successful-run ping to their individual Healthchecks.io checks. The
+Tuya extractor sends a `/start` ping before running, its existing success ping
+after a successful run, and `/fail` if systemd reports an unsuccessful run.
+This allows Healthchecks.io to measure run time and receive immediate failure
+signals. Other jobs send only the successful-run ping. The check-in URLs are
+stored privately on the mini in
 `~/.config/solar-heartbeats/solar.env` (mode `600`) and must not be shared or
 committed to this project. Healthchecks.io alerts are routed through the
 configured ntfy integration. The five checks were manually verified as up.
+
+To enable Tuya extractor run-time measurement, install its Healthchecks
+drop-in and reload systemd:
+
+```bash
+sudo install -D -m 644 \
+  ~/solar-tuya-extractor/systemd/solar-tuya-extractor.service.d/healthchecks.conf \
+  /etc/systemd/system/solar-tuya-extractor.service.d/healthchecks.conf
+sudo systemctl daemon-reload
+```
 
 Useful commands to check or start the analysis email service:
 
@@ -518,7 +531,7 @@ inside the project directory.
 
 # 12. Report files
 
-The report generator currently produces five files.
+The report generator currently produces four files.
 
 ## Daily chart
 
@@ -532,22 +545,6 @@ Shows daily electricity consumption split into:
 - non-geyser
 
 Complete days are identified separately.
-
----
-
-## Hourly power chart
-
-```text
-solar hourly load profile.png
-```
-
-Shows the average hourly:
-
-- total load
-- geyser load
-- non-geyser load
-
-Complete days only.
 
 ---
 

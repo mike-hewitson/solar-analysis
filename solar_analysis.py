@@ -338,7 +338,14 @@ def print_summary(con, threshold):
         SELECT reading_date, reading_count, is_complete_day,
                total_energy_kwh, geyser_energy_kwh,
                non_geyser_energy_kwh, peak_total_power_w
-        FROM daily_load_summary
+        FROM (
+            SELECT reading_date, reading_count, is_complete_day,
+                   total_energy_kwh, geyser_energy_kwh,
+                   non_geyser_energy_kwh, peak_total_power_w
+            FROM daily_load_summary
+            ORDER BY reading_date DESC
+            LIMIT 10
+        ) AS recent_days
         ORDER BY reading_date
     """):
         print(

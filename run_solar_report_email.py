@@ -11,7 +11,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPORT_DIR = SCRIPT_DIR / "solar report"
 IMAGES = [
     REPORT_DIR / "solar daily load profile.png",
-    REPORT_DIR / "solar hourly load profile.png",
     REPORT_DIR / "solar hourly energy profile.png",
 ]
 RECIPIENTS = ["mike@hewitson.co.za", "hewitson.is.me@gmail.com"]

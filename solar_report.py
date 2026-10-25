@@ -24,7 +24,7 @@ import sys
 from datetime import datetime
 
 from solar_db import connect_database
-from solar_chart_colors import GEYSER, NON_GEYSER, TOTAL
+from solar_chart_colors import GEYSER, NON_GEYSER
 
 import matplotlib.pyplot as plt
 
@@ -268,36 +268,6 @@ def make_daily_chart(out_dir, daily):
     return path
 
 
-def make_hourly_chart(out_dir, hourly):
-    hours = [r[0] for r in hourly]
-    total = [r[2] or 0 for r in hourly]
-    geyser = [r[3] or 0 for r in hourly]
-    non_geyser = [r[4] or 0 for r in hourly]
-
-    labels = [f"{h:02d}:00" for h in hours]
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    ax.plot(hours, total, marker="o", color=TOTAL, label="Total")
-    ax.plot(hours, geyser, marker="o", color=GEYSER, label="Geyser")
-    ax.plot(hours, non_geyser, marker="o", color=NON_GEYSER, label="Non-geyser")
-
-    ax.set_title("Average Hourly Load — Complete Days Only")
-    ax.set_xlabel("Time of day")
-    ax.set_ylabel("Average power (W)")
-    ax.set_xticks(hours)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.grid(True, alpha=0.25)
-    ax.legend()
-
-    fig.tight_layout()
-    path = out_dir / "solar hourly load profile.png"
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
-
-    return path
-
-
 def make_hourly_energy_chart(out_dir, hourly):
     hours = [r[0] for r in hourly]
     total = [r[5] or 0 for r in hourly]
@@ -414,14 +384,12 @@ def main():
 
     daily_csv, hourly_csv = export_csv(out_dir, daily, hourly)
     daily_png = make_daily_chart(out_dir, daily)
-    hourly_png = make_hourly_chart(out_dir, hourly)
     hourly_energy_png = make_hourly_energy_chart(out_dir, hourly)
 
     print_report(daily, hourly, peak_averages)
 
     print("\nFiles created:")
     print(f"  {daily_png}")
-    print(f"  {hourly_png}")
     print(f"  {hourly_energy_png}")
     print(f"  {daily_csv}")
     print(f"  {hourly_csv}")
