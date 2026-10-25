@@ -278,23 +278,23 @@ off is started after it returns. The Tuya extractor remains on its separate
 every-two-hours schedule.
 
 All five scheduled jobs (extractor, backup, health check, analysis and report)
-send a successful-run ping to their individual Healthchecks.io checks. The
-Tuya extractor sends a `/start` ping before running, its existing success ping
-after a successful run, and `/fail` if systemd reports an unsuccessful run.
-This allows Healthchecks.io to measure run time and receive immediate failure
-signals. Other jobs send only the successful-run ping. The check-in URLs are
+send a `/start` ping before running, a success ping after a successful run, and
+`/fail` if systemd reports an unsuccessful run. This allows Healthchecks.io to
+measure run time and receive immediate failure signals. The check-in URLs are
 stored privately on the mini in
 `~/.config/solar-heartbeats/solar.env` (mode `600`) and must not be shared or
 committed to this project. Healthchecks.io alerts are routed through the
 configured ntfy integration. The five checks were manually verified as up.
 
-To enable Tuya extractor run-time measurement, install its Healthchecks
-drop-in and reload systemd:
+To enable run-time measurement and failure signaling, install the Healthchecks
+drop-ins and reload systemd:
 
 ```bash
-sudo install -D -m 644 \
-  ~/solar-tuya-extractor/systemd/solar-tuya-extractor.service.d/healthchecks.conf \
-  /etc/systemd/system/solar-tuya-extractor.service.d/healthchecks.conf
+for unit in solar-tuya-extractor solar-db-backup solar-health-check solar-analysis solar-report; do
+  sudo install -D -m 644 \
+    "$HOME/solar-health-check/systemd/$unit.service.d/healthchecks.conf" \
+    "/etc/systemd/system/$unit.service.d/healthchecks.conf"
+done
 sudo systemctl daemon-reload
 ```
 
