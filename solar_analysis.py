@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Solar Step 3 — derive cleaned load data and summary tables from solar_meter.db.
+Solar Step 3 — check the database and build cleaned load summaries.
 
 Run from the Solar directory:
 
     python3 solar_analysis.py
+    python3 solar_analysis.py --check-only
 
 The script:
+  - reports database size, timestamp integrity, recent coverage, and extraction history
   - leaves meter_readings untouched
   - cleans small Power_B readings as geyser noise
   - calculates non-geyser load
@@ -15,6 +17,7 @@ The script:
   - only treats complete calendar days as eligible for hourly averages
 """
 
+import argparse
 import configparser
 from pathlib import Path
 
@@ -55,6 +58,139 @@ def load_config():
 
 def connect(db_path):
     return open_database(db_path)
+
+
+def format_gap(seconds):
+    total_seconds = int(round(float(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def print_database_check(con):
+    print("========================================")
+    print("Solar database integrity check")
+    print("========================================")
+    print(f"Database: {database_label()}")
+
+    if database_backend() in {"postgres", "postgresql"}:
+        database_size_bytes = con.execute(
+            "SELECT pg_database_size(current_database())"
+        ).fetchone()[0]
+    else:
+        page_count = con.execute("PRAGMA page_count").fetchone()[0]
+        page_size = con.execute("PRAGMA page_size").fetchone()[0]
+        database_size_bytes = page_count * page_size
+
+    print(f"Database storage: {database_size_bytes / 1_000_000:.2f} MB")
+
+    row = con.execute("""
+        SELECT
+            COUNT(*),
+            MIN(timestamp_sast),
+            MAX(timestamp_sast),
+            COUNT(DISTINCT timestamp_sast)
+        FROM meter_readings
+    """).fetchone()
+
+    print(f"\nTotal rows:          {row[0]:,}")
+    print(f"Earliest timestamp:  {row[1]}")
+    print(f"Latest timestamp:    {row[2]}")
+    print(f"Distinct timestamps: {row[3]:,}")
+
+    duplicates = con.execute("""
+        SELECT COUNT(*)
+        FROM (
+            SELECT timestamp_sast
+            FROM meter_readings
+            GROUP BY timestamp_sast
+            HAVING COUNT(*) > 1
+        )
+    """).fetchone()[0]
+    print(f"Duplicate timestamps: {duplicates}")
+
+    print("\nDaily coverage (most recent 14 days):")
+    print("-" * 78)
+    daily = con.execute("""
+        SELECT
+            reading_date,
+            COUNT(*) AS total,
+            SUM(CASE WHEN power_a_w IS NOT NULL THEN 1 ELSE 0 END) AS power_a,
+            SUM(CASE WHEN power_b_w IS NOT NULL THEN 1 ELSE 0 END) AS power_b,
+            MIN(timestamp_sast) AS first_reading,
+            MAX(timestamp_sast) AS last_reading
+        FROM meter_readings
+        GROUP BY reading_date
+        ORDER BY reading_date DESC
+        LIMIT 14
+    """).fetchall()
+    daily.reverse()
+
+    print(
+        f"{'Date':<12} {'Rows':>7} {'A':>7} {'B':>7} "
+        f"{'First':>24} {'Last':>24}"
+    )
+    for row in daily:
+        print(
+            f"{row[0]:<12} {row[1]:>7,} {row[2]:>7,} {row[3]:>7,} "
+            f"{row[4]:>24} {row[5]:>24}"
+        )
+
+    print("\nLargest timestamp gaps:")
+    print("-" * 78)
+    if database_backend() in {"postgres", "postgresql"}:
+        gap_seconds = (
+            "EXTRACT(EPOCH FROM "
+            "(timestamp_sast::timestamp - previous::timestamp))"
+        )
+        rounded_gap = f"ROUND(({gap_seconds})::numeric, 3)"
+    else:
+        gap_seconds = (
+            "(julianday(timestamp_sast) - julianday(previous)) * 86400"
+        )
+        rounded_gap = f"ROUND(({gap_seconds}), 3)"
+
+    gaps = con.execute(f"""
+        WITH ordered AS (
+            SELECT
+                timestamp_sast,
+                LAG(timestamp_sast) OVER (ORDER BY timestamp_sast) AS previous
+            FROM meter_readings
+        )
+        SELECT previous, timestamp_sast, {rounded_gap} AS gap_seconds
+        FROM ordered
+        WHERE previous IS NOT NULL
+        ORDER BY gap_seconds DESC
+        LIMIT 15
+    """).fetchall()
+    for previous, current, seconds in gaps:
+        print(f"{format_gap(seconds):>10}  {previous} -> {current}")
+
+    print("\nExtraction runs:")
+    print("-" * 78)
+    runs = con.execute("""
+        SELECT
+            source_file,
+            started_at,
+            completed_at,
+            rows_read,
+            rows_inserted,
+            rows_updated,
+            rows_rejected,
+            status
+        FROM extraction_runs
+        ORDER BY id DESC
+        LIMIT 10
+    """).fetchall()
+    for row in runs:
+        print(
+            f"{row[0]} | {row[7]} | read={row[3]} "
+            f"inserted={row[4]} updated={row[5]} rejected={row[6]}"
+        )
+
+    print("\n========================================")
+    print("Check complete")
+    print("========================================")
 
 
 def create_schema(con, noise_threshold):
@@ -319,6 +455,7 @@ def populate_hourly(con):
     ORDER BY hour
     """)
 
+
 def print_summary(con, threshold):
     print("\n========================================")
     print("Step 3 analysis layer")
@@ -380,10 +517,24 @@ def print_summary(con, threshold):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Check the Solar database and build its analysis summaries."
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Run the database integrity check without rebuilding analysis tables.",
+    )
+    args = parser.parse_args()
+
     db_path, threshold = load_config()
     con = connect(db_path)
 
     try:
+        print_database_check(con)
+        if args.check_only:
+            return
+
         create_schema(con, threshold)
         populate_daily(con)
         populate_hourly(con)

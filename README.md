@@ -59,7 +59,7 @@ The important files are:
 |---|---|
 | `config.ini` | Tuya credentials, database location and analysis settings |
 | `tuya_power_extractor.py` | Downloads meter readings from Tuya and stores them in the configured database |
-| `solar_analysis.py` | Builds cleaned readings, daily summaries and hourly profiles |
+| `solar_analysis.py` | Checks database integrity, then builds cleaned readings, daily summaries and hourly profiles |
 | `solar_report.py` | Produces charts, CSV reports and planning summaries |
 | `plot_non_geyser_power.py` | Plots total and/or non-geyser power for a selected day from existing database readings |
 | `solar_meter.db` | MacBook SQLite database retained as a fallback copy |
@@ -378,8 +378,8 @@ Do not put real Tuya credentials into files that are shared or uploaded.
 
 ## `solar_analysis.py`
 
-This program takes the raw readings in `solar_meter.db` and creates the
-derived analysis layer.
+This program checks the configured database, then takes its raw readings and
+creates the derived analysis layer.
 
 It does **not** modify or delete the raw meter readings.
 
@@ -391,6 +391,14 @@ python3 solar_analysis.py
 ```
 
 It rebuilds the derived analysis from the raw readings.
+
+The integrity check reports database storage, timestamp duplicates, recent
+daily coverage, the largest timestamp gaps, and recent extraction runs. To run
+only that read-only check without rebuilding derived tables:
+
+```bash
+python3 solar_analysis.py --check-only
+```
 
 This means it is safe to run again after:
 
@@ -853,10 +861,11 @@ hourly_load_profile
 
 The derived objects can safely be rebuilt from the raw data.
 
-Run `python3 check_solar_database.py` to review database counts, duplicate
-timestamps, database storage size, recent daily coverage, extraction history,
-and the 15 largest timestamp gaps. Gap durations are displayed as `HH:MM:SS`;
-storage is shown in megabytes (MB).
+`solar_analysis.py` starts with a database integrity check showing row counts,
+duplicate timestamps, storage size, recent daily coverage, extraction history,
+and the 15 largest timestamp gaps. Gap durations use `HH:MM:SS`; storage is
+shown in megabytes (MB). Run `python3 solar_analysis.py --check-only` to perform
+the check without rebuilding the analysis tables.
 
 ---
 
