@@ -14,11 +14,10 @@ No Tuya API calls or data extraction are performed.
 
 import argparse
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from solar_db import connect_database, database_label, sql_placeholder
 from solar_chart_colors import GEYSER, NON_GEYSER, TOTAL
@@ -180,70 +179,69 @@ def main():
         / f"{chart_suffix}_{selected_day.isoformat()}.png"
     )
 
+    # Average readings within each minute; leave missing minutes blank so
+    # gaps in the source data remain visible in the bar chart.
+    minutes = {
+        minute: {"total": [], "geyser": [], "non_geyser": []}
+        for minute in range(24 * 60)
+    }
+    for dt, total, geyser, non_geyser in zip(
+        times, total_w, geyser_w, non_geyser_w
+    ):
+        minute = dt.hour * 60 + dt.minute
+        minutes[minute]["total"].append(total / 1000.0)
+        minutes[minute]["geyser"].append(geyser / 1000.0)
+        minutes[minute]["non_geyser"].append(non_geyser / 1000.0)
+
+    minute_indices = [
+        minute for minute in range(24 * 60) if minutes[minute]["total"]
+    ]
+    minute_averages = {
+        channel: [
+            sum(minutes[minute][channel]) / len(minutes[minute][channel])
+            for minute in minute_indices
+        ]
+        for channel in ("total", "geyser", "non_geyser")
+    }
+
     fig, ax = plt.subplots(figsize=(13, 6.5))
     if args.chart == "both":
-        # Average readings within each minute and stack the two components.
-        # Missing minutes are left blank so data gaps remain visible.
-        minutes = {minute: {"geyser": [], "non_geyser": []}
-                   for minute in range(24 * 60)}
-        for dt, geyser, non_geyser in zip(times, geyser_w, non_geyser_w):
-            minute = dt.hour * 60 + dt.minute
-            minutes[minute]["geyser"].append(geyser / 1000.0)
-            minutes[minute]["non_geyser"].append(non_geyser / 1000.0)
-        minute_indices = [
-            minute for minute in range(24 * 60)
-            if minutes[minute]["geyser"]
-        ]
-        geyser_avg = [
-            sum(minutes[minute]["geyser"]) / len(minutes[minute]["geyser"])
-            for minute in minute_indices
-        ]
-        non_geyser_avg = [
-            sum(minutes[minute]["non_geyser"]) / len(minutes[minute]["non_geyser"])
-            for minute in minute_indices
-        ]
-        ax.bar(minute_indices, non_geyser_avg, width=0.9,
+        # Stack the two components; their combined height is total household power.
+        ax.bar(minute_indices, minute_averages["non_geyser"], width=0.9,
                color=NON_GEYSER,
                edgecolor="white", linewidth=0.25,
                label="Non-geyser power")
-        ax.bar(minute_indices, geyser_avg, width=0.9, bottom=non_geyser_avg,
+        ax.bar(minute_indices, minute_averages["geyser"], width=0.9,
+               bottom=minute_averages["non_geyser"],
                color=GEYSER,
                edgecolor="white", linewidth=0.25,
                label="Geyser power")
-        hour_ticks = list(range(0, 24 * 60, 60))
-        ax.set_xticks(hour_ticks, [f"{hour:02d}:00" for hour in range(24)],
-                      rotation=45)
-        ax.set_xlim(-1, 24 * 60)
     else:
-        if args.chart == "non-geyser":
-            ax.plot(times, [value / 1000.0 for value in non_geyser_w],
-                    color=NON_GEYSER, linewidth=1.0, label="Non-geyser power")
-        elif args.chart == "geyser":
-            ax.plot(times, [value / 1000.0 for value in geyser_w],
-                    color=GEYSER, linewidth=1.0, label="Geyser power")
-        elif args.chart == "total":
-            ax.plot(times, [value / 1000.0 for value in total_w],
-                    color=TOTAL, linewidth=1.0, label="Total household power")
+        channel, color, label = {
+            "non-geyser": ("non_geyser", NON_GEYSER, "Non-geyser power"),
+            "geyser": ("geyser", GEYSER, "Geyser power"),
+            "total": ("total", TOTAL, "Total household power"),
+        }[args.chart]
+        ax.bar(
+            minute_indices, minute_averages[channel], width=0.9,
+            color=color, edgecolor="white", linewidth=0.25, label=label
+        )
+
+    hour_ticks = list(range(0, 24 * 60, 60))
+    ax.set_xticks(hour_ticks, [f"{hour:02d}:00" for hour in range(24)],
+                  rotation=45)
+    ax.set_xlim(-1, 24 * 60)
     chart_titles = {
-        "non-geyser": "Non-geyser household power",
-        "geyser": "Geyser power",
-        "total": "Total household power",
+        "non-geyser": "Per-minute average non-geyser household power",
+        "geyser": "Per-minute average geyser power",
+        "total": "Per-minute average total household power",
         "both": "Per-minute average household power (stacked)",
     }
     ax.set_title(
         f"{chart_titles[args.chart]} — {selected_day.strftime('%A, %d %B %Y')}"
     )
-    ax.set_xlabel("Hour (South African time)" if args.chart == "both"
-                  else "Time (South African time)")
+    ax.set_xlabel("Hour (South African time)")
     ax.set_ylabel("Power (kW)")
-    if args.chart != "both":
-        ax.set_xlim(
-            datetime.combine(selected_day, time.min, TZ),
-            datetime.combine(selected_day + timedelta(days=1), time.min, TZ),
-        )
-        ax.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 2), tz=TZ))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=TZ))
-    ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right")
 
     summary_parts = [f"Readings: {len(data):,}"]

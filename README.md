@@ -616,10 +616,11 @@ with readings and complete-day coverage. Months start at October 2026.
 
 ## `plot_non_geyser_power.py`
 
-This script creates a graph for one calendar day using readings already stored
-in the configured database (SQLite or PostgreSQL). The `--chart both` option plots three lines together: geyser,
-non-geyser and total household power. It does **not** contact Tuya, extract data,
-or modify the database.
+This script creates a bar chart for one calendar day using readings already
+stored in the configured database (SQLite or PostgreSQL). Each option shows
+per-minute average power; `--chart both` stacks geyser and non-geyser bars so
+their combined height represents total household power. It does **not** contact
+Tuya, extract data, or modify the database.
 
 If `--date` is omitted, it charts yesterday using South African local time.
 
@@ -694,8 +695,8 @@ Add `--show` to open the graph window:
 
 ### Output
 
-For `--chart both`, the graph includes geyser power, non-geyser power and total
-household power, with a legend and daily energy totals in the footer.
+All chart options use bars. For `--chart both`, geyser and non-geyser power are
+shown as stacked bars, with a legend and daily energy totals in the footer.
 
 The PNG graph is saved in a `solar report/` folder beside the script. On the
 MacBook this is:
