@@ -549,7 +549,8 @@ Shows daily electricity consumption split into:
 - geyser
 - non-geyser
 
-Complete days are identified separately.
+The chart includes only dates in the current calendar month, using the
+`Africa/Johannesburg` timezone. Complete days are identified separately.
 
 ---
 

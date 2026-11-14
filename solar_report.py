@@ -4,7 +4,7 @@
 Solar Step 4 — Load Profile Report
 
 Reads the derived data in solar_meter.db and produces:
-  1. Daily energy chart for all available dates
+  1. Daily energy chart for the current Johannesburg calendar month
   2. Monthly energy chart and summary from October 2026 onward
   3. Average hourly load profile for complete days only
   4. CSV exports of the daily, monthly and hourly summaries
@@ -25,6 +25,7 @@ import statistics
 import sys
 from collections import defaultdict
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from solar_db import connect_database
 from solar_chart_colors import GEYSER, NON_GEYSER
@@ -220,6 +221,15 @@ def find_peak_averages(con, windows_minutes=(1, 5, 15), top_n=3):
 
     return results
 
+
+def _reading_date(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
 def summarize_monthly(daily):
     """Aggregate daily energy into calendar months from October 2026 onward."""
     monthly = defaultdict(lambda: {
@@ -231,13 +241,7 @@ def summarize_monthly(daily):
     })
 
     for row in daily:
-        value = row[0]
-        if isinstance(value, datetime):
-            reading_date = value.date()
-        elif isinstance(value, date):
-            reading_date = value
-        else:
-            reading_date = date.fromisoformat(str(value))
+        reading_date = _reading_date(row[0])
         if reading_date < MONTHLY_REPORT_START:
             continue
 
@@ -316,11 +320,23 @@ def export_csv(out_dir, daily, hourly, monthly):
     return daily_path, hourly_path, monthly_path
 
 
-def make_daily_chart(out_dir, daily):
-    dates = [r[0] for r in daily]
-    total = [r[6] or 0 for r in daily]
-    geyser = [r[7] or 0 for r in daily]
-    non_geyser = [r[8] or 0 for r in daily]
+def make_daily_chart(out_dir, daily, as_of_date=None):
+    """Create the daily energy chart for the current Johannesburg month."""
+    as_of_date = as_of_date or datetime.now(
+        ZoneInfo("Africa/Johannesburg")
+    ).date()
+    chart_daily = []
+    for row in daily:
+        reading_date = _reading_date(row[0])
+        if (reading_date.year, reading_date.month) == (
+            as_of_date.year, as_of_date.month
+        ):
+            chart_daily.append(row)
+
+    dates = [_reading_date(row[0]).isoformat() for row in chart_daily]
+    total = [r[6] or 0 for r in chart_daily]
+    geyser = [r[7] or 0 for r in chart_daily]
+    non_geyser = [r[8] or 0 for r in chart_daily]
 
     x = list(range(len(dates)))
 
@@ -329,7 +345,7 @@ def make_daily_chart(out_dir, daily):
     ax.bar(x, non_geyser, color=NON_GEYSER, label="Non-geyser")
     ax.bar(x, geyser, bottom=non_geyser, color=GEYSER, label="Geyser")
 
-    for i, row in enumerate(daily):
+    for i, row in enumerate(chart_daily):
         if row[5]:
             ax.text(
                 i,
@@ -340,7 +356,13 @@ def make_daily_chart(out_dir, daily):
                 fontsize=9
             )
 
-    ax.set_title("Daily Electricity Consumption")
+    month_title = as_of_date.strftime("%B %Y")
+    ax.set_title(f"Daily Electricity Consumption — {month_title}")
+    if not chart_daily:
+        ax.text(
+            0.5, 0.5, f"No readings for {month_title}",
+            transform=ax.transAxes, ha="center", va="center"
+        )
     ax.set_ylabel("Energy (kWh)")
     ax.set_xticks(x)
     ax.set_xticklabels(dates, rotation=30, ha="right")
