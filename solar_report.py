@@ -74,6 +74,26 @@ def fetch_data(con):
     return daily, hourly
 
 
+def find_peak_total_load(con):
+    """Return the peak total-load reading and its component loads on a complete day."""
+    return con.execute("""
+        SELECT
+            timestamp_sast,
+            total_power_w,
+            geyser_power_w,
+            non_geyser_power_w
+        FROM v_meter_readings_clean
+        WHERE reading_date IN (
+            SELECT reading_date
+            FROM daily_load_summary
+            WHERE is_complete_day = 1
+        )
+          AND total_power_w IS NOT NULL
+        ORDER BY total_power_w DESC, timestamp_sast
+        LIMIT 1
+    """).fetchone()
+
+
 def find_peak_averages(con, windows_minutes=(1, 5, 15), top_n=3):
     """
     Find the highest rolling-average loads for the requested time windows.
@@ -406,7 +426,7 @@ def make_monthly_chart(out_dir, monthly):
     return path
 
 
-def print_report(daily, hourly, monthly, peak_averages):
+def print_report(daily, hourly, monthly, peak_averages, peak_total_load):
     complete = [r for r in daily if r[5]]
 
     print("\n========================================")
@@ -443,8 +463,19 @@ def print_report(daily, hourly, monthly, peak_averages):
         print(f"  Non-geyser:            {other / len(complete):8.3f} kWh/day")
         print(f"  Geyser share:          {100 * geyser / total:8.1f}%")
 
-        peak = max(r[12] or 0 for r in complete)
-        print(f"  Peak total load:       {peak / 1000:8.3f} kW")
+        if peak_total_load:
+            timestamp = datetime.fromisoformat(str(peak_total_load[0]))
+            total_w = peak_total_load[1] or 0.0
+            geyser_w = peak_total_load[2] or 0.0
+            non_geyser_w = peak_total_load[3] or 0.0
+            print(
+                f"  Peak total load:       {total_w / 1000:8.3f} kW"
+                f" at {timestamp:%Y-%m-%d %H:%M:%S}"
+            )
+            print(
+                f"    Geyser:              {geyser_w / 1000:8.3f} kW"
+                f"  Non-geyser: {non_geyser_w / 1000:8.3f} kW"
+            )
 
     if peak_averages:
         print("\nTop 3 rolling-average loads:")
@@ -501,6 +532,7 @@ def main():
 
     with connect_database() as con:
         daily, hourly = fetch_data(con)
+        peak_total_load = find_peak_total_load(con)
         peak_averages = find_peak_averages(con)
 
     if not daily:
@@ -512,7 +544,7 @@ def main():
     hourly_energy_png = make_hourly_energy_chart(out_dir, hourly)
     monthly_png = make_monthly_chart(out_dir, monthly)
 
-    print_report(daily, hourly, monthly, peak_averages)
+    print_report(daily, hourly, monthly, peak_averages, peak_total_load)
 
     print("\nFiles created:")
     print(f"  {daily_png}")

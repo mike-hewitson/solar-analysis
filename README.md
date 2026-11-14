@@ -512,6 +512,11 @@ instead of the energy consumed during the entire hour.
 This program reads the derived analysis tables and produces graphical and CSV
 reports.
 
+The text summary reports the highest instantaneous total load from complete
+days, with the geyser and non-geyser readings from that same timestamp. The
+split therefore describes the composition of the total peak rather than the
+independent maximum of each load.
+
 Run:
 
 ```bash
