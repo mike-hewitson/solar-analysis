@@ -12,6 +12,7 @@ REPORT_DIR = SCRIPT_DIR / "solar report"
 IMAGES = [
     REPORT_DIR / "solar daily load profile.png",
     REPORT_DIR / "solar hourly energy profile.png",
+    REPORT_DIR / "solar monthly load profile.png",
 ]
 RECIPIENTS = ["mike@hewitson.co.za", "hewitson.is.me@gmail.com"]
 SENDER = "hewitson.is.me@gmail.com"

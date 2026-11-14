@@ -88,12 +88,12 @@ def load_model(path):
     return mod
 
 
-def build_pv(mod, year, cache, no_download):
+def build_pv(mod, year, cache, no_download, solar_defaults):
     east_data, _, _ = mod.fetch_pvgis(
-        mod.EAST_KWP, -90, year, cache, no_download
+        solar_defaults["east_kwp"], -90, year, cache, no_download
     )
     west_data, _, _ = mod.fetch_pvgis(
-        mod.WEST_KWP, 90, year, cache, no_download
+        solar_defaults["west_kwp"], 90, year, cache, no_download
     )
 
     east = mod.pvgis_hourly(east_data)
@@ -138,6 +138,12 @@ def simulate_normal_year(mod, pv, load_profile, projection, args, year):
     ns.geyser_start = 9
     ns.geyser_end = 16
     ns.geyser_max_kw = args.geyser_max_kw
+    # Keep the baseline run aligned with solar_pvgis_simulation.py's CLI
+    # defaults for the geyser controls.
+    ns.geyser_min_soc = 0.20
+    ns.geyser_load_shed_kw = None
+    ns.geyser_restart_kw = None
+    ns.geyser_pv_surplus_only = False
 
     daily, annual, monthly, min_soc, max_soc = mod.simulate_year(
         pv, load_profile, projection, ns, year
@@ -330,8 +336,9 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
 
     mod = load_model(script)
+    solar_defaults = mod.load_solar_defaults(mod.load_config())
 
-    pv = build_pv(mod, args.year, cache, args.no_download)
+    pv = build_pv(mod, args.year, cache, args.no_download, solar_defaults)
     load_profile = mod.load_complete_measured_day(db)
     projection = mod.load_daily_projection(db)
 
@@ -339,7 +346,12 @@ def main():
     print("Solar Step 6 — grid-outage resilience simulation")
     print("=" * 72)
     print(f"PVGIS year:                 {args.year}")
-    print("PV:                         7.00 kWp (3.5 east + 3.5 west)")
+    print(
+        "PV:                         "
+        f"{solar_defaults['east_kwp'] + solar_defaults['west_kwp']:.2f} kWp "
+        f"({solar_defaults['east_kwp']:.2f} east + "
+        f"{solar_defaults['west_kwp']:.2f} west)"
+    )
     print(f"Inverter reference:         {args.inverter_kw:.2f} kW")
     print(f"Battery usable:             {args.battery_kwh:.2f} kWh")
     print(f"Battery reserve:            {args.reserve * 100:.1f}%")

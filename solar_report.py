@@ -5,9 +5,10 @@ Solar Step 4 — Load Profile Report
 
 Reads the derived data in solar_meter.db and produces:
   1. Daily energy chart for all available dates
-  2. Average hourly load profile for complete days only
-  3. CSV exports of the daily and hourly summaries
-  4. A text summary with key planning metrics
+  2. Monthly energy chart and summary from October 2026 onward
+  3. Average hourly load profile for complete days only
+  4. CSV exports of the daily, monthly and hourly summaries
+  5. A text summary with key planning metrics
 
 Usage:
     python3 solar_report.py
@@ -19,9 +20,11 @@ section as the extractor and analysis scripts.
 from pathlib import Path
 import configparser
 import csv
+import calendar
 import statistics
 import sys
-from datetime import datetime
+from collections import defaultdict
+from datetime import date, datetime
 
 from solar_db import connect_database
 from solar_chart_colors import GEYSER, NON_GEYSER
@@ -30,6 +33,7 @@ import matplotlib.pyplot as plt
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+MONTHLY_REPORT_START = date(2026, 10, 1)
 
 
 def fetch_data(con):
@@ -196,9 +200,61 @@ def find_peak_averages(con, windows_minutes=(1, 5, 15), top_n=3):
 
     return results
 
-def export_csv(out_dir, daily, hourly):
+def summarize_monthly(daily):
+    """Aggregate daily energy into calendar months from October 2026 onward."""
+    monthly = defaultdict(lambda: {
+        "days_with_readings": 0,
+        "complete_days": 0,
+        "total_energy_kwh": 0.0,
+        "geyser_energy_kwh": 0.0,
+        "non_geyser_energy_kwh": 0.0,
+    })
+
+    for row in daily:
+        value = row[0]
+        if isinstance(value, datetime):
+            reading_date = value.date()
+        elif isinstance(value, date):
+            reading_date = value
+        else:
+            reading_date = date.fromisoformat(str(value))
+        if reading_date < MONTHLY_REPORT_START:
+            continue
+
+        month = reading_date.strftime("%Y-%m")
+        summary = monthly[month]
+        summary["days_with_readings"] += 1
+        summary["complete_days"] += bool(row[5])
+        summary["total_energy_kwh"] += row[6] or 0.0
+        summary["geyser_energy_kwh"] += row[7] or 0.0
+        summary["non_geyser_energy_kwh"] += row[8] or 0.0
+
+    results = []
+    for month, summary in sorted(monthly.items()):
+        year, month_number = map(int, month.split("-"))
+        days_in_month = calendar.monthrange(year, month_number)[1]
+        is_complete_month = (
+            summary["days_with_readings"] == days_in_month
+            and summary["complete_days"] == days_in_month
+        )
+        results.append((
+            month,
+            days_in_month,
+            summary["days_with_readings"],
+            summary["complete_days"],
+            is_complete_month,
+            summary["total_energy_kwh"],
+            summary["geyser_energy_kwh"],
+            summary["non_geyser_energy_kwh"],
+        ))
+
+    return results
+
+
+def export_csv(out_dir, daily, hourly, monthly):
     daily_path = out_dir / "solar daily load summary.csv"
     hourly_path = out_dir / "solar hourly load profile.csv"
+    monthly_path = out_dir / "solar monthly load summary.csv"
 
     daily_headers = [
         "reading_date", "reading_count", "first_timestamp",
@@ -216,6 +272,12 @@ def export_csv(out_dir, daily, hourly):
         "avg_non_geyser_energy_kwh"
     ]
 
+    monthly_headers = [
+        "month", "days_in_month", "days_with_readings", "complete_days",
+        "is_complete_month", "total_energy_kwh", "geyser_energy_kwh",
+        "non_geyser_energy_kwh",
+    ]
+
     with daily_path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(daily_headers)
@@ -226,7 +288,12 @@ def export_csv(out_dir, daily, hourly):
         writer.writerow(hourly_headers)
         writer.writerows(hourly)
 
-    return daily_path, hourly_path
+    with monthly_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(monthly_headers)
+        writer.writerows(monthly)
+
+    return daily_path, hourly_path, monthly_path
 
 
 def make_daily_chart(out_dir, daily):
@@ -298,7 +365,48 @@ def make_hourly_energy_chart(out_dir, hourly):
     return path
 
 
-def print_report(daily, hourly, peak_averages):
+def make_monthly_chart(out_dir, monthly):
+    months = [datetime.strptime(row[0], "%Y-%m").strftime("%b %Y") for row in monthly]
+    total = [row[5] for row in monthly]
+    geyser = [row[6] for row in monthly]
+    non_geyser = [row[7] for row in monthly]
+    x = list(range(len(months)))
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.bar(x, non_geyser, color=NON_GEYSER, label="Non-geyser")
+    ax.bar(x, geyser, bottom=non_geyser, color=GEYSER, label="Geyser")
+
+    if total:
+        label_offset = max(total) * 0.015
+        for i, row in enumerate(monthly):
+            if row[4]:
+                ax.text(
+                    i,
+                    total[i] + label_offset,
+                    f"{total[i]:.1f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
+
+    ax.set_title("Monthly Electricity Consumption (from October 2026)")
+    ax.set_ylabel("Energy (kWh)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(months, rotation=30, ha="right")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.25)
+    if not monthly:
+        ax.text(0.5, 0.5, "No monthly data available from October 2026", ha="center", va="center", transform=ax.transAxes)
+
+    fig.tight_layout()
+    path = out_dir / "solar monthly load profile.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+    return path
+
+
+def print_report(daily, hourly, monthly, peak_averages):
     complete = [r for r in daily if r[5]]
 
     print("\n========================================")
@@ -307,6 +415,22 @@ def print_report(daily, hourly, peak_averages):
 
     print(f"Calendar days available: {len(daily)}")
     print(f"Complete days:           {len(complete)}")
+
+    print("\nMonthly electricity consumption (from October 2026):")
+    if monthly:
+        print(
+            f"  {'Month':<10}  {'Total kWh':>10}  {'Geyser kWh':>11}  "
+            f"{'Non-geyser kWh':>15}  {'Complete days':>14}"
+        )
+        for row in monthly:
+            month_label = datetime.strptime(row[0], "%Y-%m").strftime("%b %Y")
+            month_status = "complete" if row[4] else "to date / partial"
+            print(
+                f"  {month_label:<10}  {row[5]:10.1f}  {row[6]:11.1f}  "
+                f"{row[7]:15.1f}  {row[3]:>4}/{row[1]:<4} ({month_status})"
+            )
+    else:
+        print("  No monthly data available from October 2026.")
 
     if complete:
         total = sum(r[6] or 0 for r in complete)
@@ -382,17 +506,21 @@ def main():
     if not daily:
         raise RuntimeError("No daily analysis data found. Run solar_analysis.py first.")
 
-    daily_csv, hourly_csv = export_csv(out_dir, daily, hourly)
+    monthly = summarize_monthly(daily)
+    daily_csv, hourly_csv, monthly_csv = export_csv(out_dir, daily, hourly, monthly)
     daily_png = make_daily_chart(out_dir, daily)
     hourly_energy_png = make_hourly_energy_chart(out_dir, hourly)
+    monthly_png = make_monthly_chart(out_dir, monthly)
 
-    print_report(daily, hourly, peak_averages)
+    print_report(daily, hourly, monthly, peak_averages)
 
     print("\nFiles created:")
     print(f"  {daily_png}")
     print(f"  {hourly_energy_png}")
+    print(f"  {monthly_png}")
     print(f"  {daily_csv}")
     print(f"  {hourly_csv}")
+    print(f"  {monthly_csv}")
     print()
 
 

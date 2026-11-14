@@ -255,7 +255,7 @@ the local PostgreSQL database. Times are in `Africa/Johannesburg`:
 | 22:00 | `solar-db-backup.timer` | Creates a PostgreSQL custom-format dump in `~/solar-backups/` |
 | 05:00 | `solar-health-check.timer` | Emails the database integrity and coverage report |
 | 05:05 | `solar-analysis.timer` | Rebuilds analysis tables and emails the complete output |
-| 05:10 | `solar-report.timer` | Emails report output with the two generated PNG charts attached |
+| 05:10 | `solar-report.timer` | Emails report output with the generated PNG charts attached |
 
 The health check, analysis, and report emails go through the configured Gmail
 `msmtp` account to `mike@hewitson.co.za` and `hewitson.is.me@gmail.com`. The
@@ -531,7 +531,7 @@ inside the project directory.
 
 # 12. Report files
 
-The report generator currently produces four files.
+The report generator currently produces six files.
 
 ## Daily chart
 
@@ -560,6 +560,19 @@ This is particularly useful for solar modelling.
 
 ---
 
+## Monthly chart
+
+```text
+solar monthly load profile.png
+```
+
+Shows monthly electricity consumption from October 2026 onward, split into
+geyser and non-geyser energy. The current month is shown month-to-date; totals
+are labelled on the chart only when every day in that month has complete
+readings.
+
+---
+
 ## Daily CSV
 
 ```text
@@ -577,6 +590,17 @@ solar hourly load profile.csv
 ```
 
 Contains the complete-day hourly profile.
+
+---
+
+## Monthly CSV
+
+```text
+solar monthly load summary.csv
+```
+
+Contains monthly total, geyser and non-geyser energy, plus the number of days
+with readings and complete-day coverage. Months start at October 2026.
 
 
 

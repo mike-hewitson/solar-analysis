@@ -16,6 +16,8 @@ import argparse
 import csv
 from pathlib import Path
 
+from solar_db import database_label
+
 
 def args():
     p = argparse.ArgumentParser()
@@ -47,6 +49,10 @@ def run_case(base_script, year, battery, root, solar_defaults, db_path, pv_cache
         geyser_start=mod.GEYSER_START,
         geyser_end=mod.GEYSER_END,
         geyser_max_kw=mod.GEYSER_MAX_KW,
+        geyser_min_soc=0.20,
+        geyser_load_shed_kw=None,
+        geyser_restart_kw=None,
+        geyser_pv_surplus_only=False,
     )
 
     east_data, _, _ = mod.fetch_pvgis(
@@ -137,7 +143,7 @@ def main():
           f"({solar_defaults['east_kwp']:.2f} east + {solar_defaults['west_kwp']:.2f} west)")
     print(f"Inverter:       {solar_defaults['inverter_kw']:.2f} kW")
     print(f"Reserve:        {solar_defaults['reserve_frac'] * 100:.1f}%")
-    print(f"Database:       {mod.database_label(db_path)}")
+    print(f"Database:       {database_label(db_path)}")
     print(f"PV cache:       {pv_cache}")
     print(f"Battery cases:  {', '.join(f'{x:g}' for x in batteries)} kWh")
     print()
