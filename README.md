@@ -644,7 +644,7 @@ script into the same directory as the analysis and report scripts:
 ```bash
 # Run on the MacBook
 cd ~/Documents/Solar
-scp plot_non_geyser_power.py piholeadmin@192.168.1.37:~/solar-health-check/
+scp plot_non_geyser_power.py piholeadmin@192.168.1.41:~/solar-health-check/
 
 # Then run on the mini
 cd ~/solar-health-check
@@ -752,7 +752,7 @@ PostgreSQL on the mini:
 Confirm the timer and most recent run:
 
 ```bash
-ssh piholeadmin@192.168.1.37
+ssh piholeadmin@192.168.1.41
 systemctl list-timers --all --no-pager | grep solar-tuya
 sudo systemctl status solar-tuya-extractor.service --no-pager -l
 ```
@@ -1306,7 +1306,7 @@ Important limitations:
 cd ~/Documents/Solar
 
 # View the mini's extractor schedule
-ssh piholeadmin@192.168.1.37
+ssh piholeadmin@192.168.1.41
 systemctl list-timers --all --no-pager | grep solar-tuya
 
 # Start an extra catch-up run on the mini

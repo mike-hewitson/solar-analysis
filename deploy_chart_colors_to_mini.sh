@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MINI_HOST="piholeadmin@192.168.1.37"
+MINI_HOST="piholeadmin@192.168.1.41"
 MINI_DIR="~/solar-health-check/"
 
 cd "$SCRIPT_DIR"
