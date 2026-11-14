@@ -810,6 +810,11 @@ Role: solar_app
 The MacBook's `solar_meter.db` is the SQLite copy retained after migration. The
 mini is the active collection and reporting host.
 
+The partial September 2026 meter import (28–30 September) was removed from the
+active PostgreSQL database because it covered only the last few days of the
+month. Daily and hourly analysis tables were rebuilt afterward. The SQLite
+fallback and archived source/backup files were left unchanged.
+
 The main raw table is:
 
 ```text
@@ -846,6 +851,11 @@ hourly_load_profile
 ```
 
 The derived objects can safely be rebuilt from the raw data.
+
+Run `python3 check_solar_database.py` to review database counts, duplicate
+timestamps, database storage size, recent daily coverage, extraction history,
+and the 15 largest timestamp gaps. Gap durations are displayed as `HH:MM:SS`;
+storage is shown in megabytes (MB).
 
 ---
 

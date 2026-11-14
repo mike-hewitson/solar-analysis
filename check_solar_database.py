@@ -1,12 +1,31 @@
 #!/usr/bin/env python3
 from solar_db import connect_database, database_backend, database_label
 
+
+def format_gap(seconds):
+    total_seconds = int(round(float(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 con = connect_database()
 
 print("========================================")
 print("Solar database integrity check")
 print("========================================")
 print(f"Database: {database_label()}")
+
+if database_backend() in {"postgres", "postgresql"}:
+    database_size_bytes = con.execute(
+        "SELECT pg_database_size(current_database())"
+    ).fetchone()[0]
+else:
+    page_count = con.execute("PRAGMA page_count").fetchone()[0]
+    page_size = con.execute("PRAGMA page_size").fetchone()[0]
+    database_size_bytes = page_count * page_size
+
+print(f"Database storage: {database_size_bytes / 1_000_000:.2f} MB")
 
 # Overall range/count
 row = con.execute("""
@@ -94,7 +113,7 @@ gaps = con.execute(f"""
 """).fetchall()
 
 for previous, current, seconds in gaps:
-    print(f"{seconds:>10.3f}s  {previous} -> {current}")
+    print(f"{format_gap(seconds):>10}  {previous} -> {current}")
 
 # Extraction history
 print("\nExtraction runs:")
