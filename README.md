@@ -61,6 +61,7 @@ The important files are:
 | `tuya_power_extractor.py` | Downloads meter readings from Tuya and stores them in the configured database |
 | `solar_analysis.py` | Checks database integrity, then builds cleaned readings, daily summaries and hourly profiles |
 | `solar_report.py` | Produces charts, CSV reports and planning summaries |
+| `solar_geyser_topup_analysis.py` | One-off estimate of top-up energy compared with shower-related heating sessions |
 | `plot_non_geyser_power.py` | Plots total and/or non-geyser power for a selected day from existing database readings |
 | `solar_meter.db` | MacBook SQLite database retained as a fallback copy |
 | `solar report/` | Output directory created by `solar_report.py` |
@@ -1296,6 +1297,30 @@ Important limitations:
   thermostat and temperature dynamics.
 - This is a resilience study using historical PVGIS weather and projected demand,
   not an engineering certification or a guarantee of performance during a real outage.
+
+---
+
+# 26. One-off geyser top-up estimate
+
+Run:
+
+```bash
+python3 solar_geyser_topup_analysis.py
+```
+
+By default, this reads the last 10 complete local calendar days and writes a
+session-level CSV under `solar report/`. Use `--days N` to change the period,
+`--end-date YYYY-MM-DD` to set its exclusive end date, or `--showers-per-day N`
+to change how many large daily sessions are treated as shower-related.
+
+The script integrates cleaned Power_B geyser readings. Each day, it treats the
+two largest heating sessions as shower-related recovery and the remaining
+smaller sessions as routine top-ups. The reported top-up proportion is top-up
+energy divided by all measured geyser energy across the period. Intervals over
+five minutes are omitted to avoid estimating energy across large data gaps.
+This is an estimate based on session size, not a direct measurement of hot-water
+use or tank heat loss. Review the session-level CSV to check that the
+classification matches the observed pattern.
 
 ---
 
