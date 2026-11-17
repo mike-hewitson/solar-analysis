@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Solar Step 4 — Load Profile Report
+Solar Profile Report
 
 Reads the derived data in solar_meter.db and produces:
   1. Daily energy chart for the current Johannesburg calendar month
@@ -452,7 +452,7 @@ def print_report(daily, hourly, monthly, peak_averages, peak_total_load):
     complete = [r for r in daily if r[5]]
 
     print("\n========================================")
-    print("Solar Step 4 load profile report")
+    print("Solar profile report")
     print("========================================")
 
     print(f"Calendar days available: {len(daily)}")

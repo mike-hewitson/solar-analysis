@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Solar Step 3 — check the database and build cleaned load summaries.
+Check the database and build cleaned load summaries.
 
 Run from the Solar directory:
 
@@ -458,7 +458,7 @@ def populate_hourly(con):
 
 def print_summary(con, threshold):
     print("\n========================================")
-    print("Step 3 analysis layer")
+    print("Analysis layer")
     print("========================================")
     print(f"Database:                 {database_label()}")
     print(f"Geyser noise threshold:   {threshold:.1f} W")
