@@ -3,7 +3,8 @@
 """
 Solar energy projection — Step 1
 
-1. Read measured monthly usage from monthly-usage.csv.
+1. Read historical monthly usage from monthly-usage.csv, then override it
+   with measured database totals for closed months with readings on every day.
 2. Use linear regression to estimate missing months.
 3. Print the complete 12-month usage profile.
 4. Read complete days from solar_meter.db.
@@ -22,6 +23,7 @@ import calendar
 import configparser
 import csv
 import statistics
+from datetime import date, datetime
 
 from solar_db import connect_database, database_label, sql_placeholder
 
@@ -44,10 +46,9 @@ def load_db_path():
     config = configparser.ConfigParser()
     config.read(config_path)
 
-    if not config.has_option("database", "path"):
-        raise ValueError("config.ini does not contain [database] path")
-
-    db_path = Path(config.get("database", "path"))
+    # PostgreSQL connections use the configured database name and do not need
+    # a filesystem path. Keep the SQLite fallback for local database setups.
+    db_path = Path(config.get("database", "path", fallback="solar_meter.db"))
 
     if not db_path.is_absolute():
         db_path = SCRIPT_DIR / db_path
@@ -57,7 +58,7 @@ def load_db_path():
 
 def load_monthly_csv():
     """
-    Read monthly usage from monthly-usage.csv.
+    Read fallback monthly usage from monthly-usage.csv.
 
     File format:
         February;326
@@ -99,6 +100,56 @@ def load_monthly_csv():
             monthly[month] = float(usage_value)
 
     return monthly
+
+
+def load_measured_monthly_usage(db_path, as_of=None):
+    """Return totals for closed months with readings on every calendar day.
+
+    This follows the solar report's monthly total_energy_kwh aggregation. A day
+    need not pass the stricter complete-day coverage check, but every calendar
+    date in the month must have a daily summary row. The current month is never
+    treated as a monthly total.
+    """
+    today = as_of or date.today()
+    current_month_start = date(today.year, today.month, 1)
+    daily_by_month = {}
+
+    with connect_database(db_path, readonly=True) as con:
+        rows = con.execute("""
+            SELECT reading_date, total_energy_kwh
+            FROM daily_load_summary
+            ORDER BY reading_date
+        """).fetchall()
+
+    for reading_date, energy_kwh in rows:
+        if isinstance(reading_date, datetime):
+            day = reading_date.date()
+        elif isinstance(reading_date, date):
+            day = reading_date
+        else:
+            day = date.fromisoformat(str(reading_date)[:10])
+
+        month_start = date(day.year, day.month, 1)
+        if month_start >= current_month_start:
+            continue
+        daily_by_month.setdefault(month_start, {})[day.day] = energy_kwh or 0.0
+
+    measured = {}
+    for month_start, days in daily_by_month.items():
+        expected_days = calendar.monthrange(month_start.year, month_start.month)[1]
+        expected_dates = set(range(1, expected_days + 1))
+        if len(days) == expected_days and set(days) == expected_dates:
+            measured[month_start.month] = sum(days.values())
+
+    return measured
+
+
+def load_monthly_usage(db_path, as_of=None):
+    """Use measured closed-month totals where available; keep CSV history otherwise."""
+    monthly = load_monthly_csv()
+    monthly.update(load_measured_monthly_usage(db_path, as_of=as_of))
+    return monthly
+
 
 def linear_regression_estimate(monthly):
     """Estimate missing months using linear regression."""
@@ -419,7 +470,8 @@ def main():
     # Monthly usage
     # --------------------------------------------------------------
 
-    monthly = load_monthly_csv()
+    db_path = load_db_path()
+    monthly = load_monthly_usage(db_path)
     measured_months = set(monthly.keys())
 
     complete_monthly, slope, intercept = (
@@ -441,8 +493,6 @@ def main():
     # --------------------------------------------------------------
     # Complete-day database average
     # --------------------------------------------------------------
-
-    db_path = load_db_path()
 
     result = calculate_complete_day_average(db_path)
 

@@ -88,7 +88,14 @@ path = solar_meter.db
 
 [analysis]
 geyser_noise_threshold_w = 20
+
+[solar]
+geyser_max_kw = 2.00
 ```
+
+`[solar] geyser_max_kw` is the default maximum geyser power used by the battery,
+PVGIS and outage simulations. A script's `--geyser-max-kw` option overrides this
+value for an individual run.
 
 ## Important
 
@@ -257,11 +264,12 @@ the local PostgreSQL database. Times are in `Africa/Johannesburg`:
 | 05:00 | `solar-health-check.timer` | Emails the database integrity and coverage report |
 | 05:05 | `solar-analysis.timer` | Rebuilds analysis tables and emails the complete output |
 | 05:10 | `solar-report.timer` | Emails report output with the generated PNG charts attached |
+| 05:15 on the first | `solar-usage-projection.timer` | Updates the monthly measured usage projection and emails the complete output |
 
-The health check, analysis, and report emails go through the configured Gmail
-`msmtp` account to `mike@hewitson.co.za` and `hewitson.is.me@gmail.com`. The
-report runner also sends an ntfy alert if report generation fails, any chart is
-missing, or email delivery fails. The ntfy topic is read from the mini's
+The health check, analysis, report and monthly projection emails go through the
+configured Gmail `msmtp` account to `mike@hewitson.co.za` and
+`hewitson.is.me@gmail.com`. The report runner also sends an ntfy alert if report
+generation fails, any chart is missing, or email delivery fails. The ntfy topic is read from the mini's
 private `~/.config/solar-db-backup/ntfy.env`; the topic value is not stored in
 this README. Report output and CSV/PNG files are kept under
 `~/solar-health-check/solar report/`.
@@ -278,14 +286,27 @@ The systemd timers are persistent, so a scheduled run missed while the mini is
 off is started after it returns. The Tuya extractor remains on its separate
 every-two-hours schedule.
 
-All five scheduled jobs (extractor, backup, health check, analysis and report)
-send a `/start` ping before running, a success ping after a successful run, and
-`/fail` if systemd reports an unsuccessful run. This allows Healthchecks.io to
-measure run time and receive immediate failure signals. The check-in URLs are
+The extractor, backup, health check, analysis and report jobs each send a
+`/start` ping before running, a success ping after a successful run, and `/fail`
+if systemd reports an unsuccessful run. This allows Healthchecks.io to measure
+run time and receive immediate failure signals. The check-in URLs are
 stored privately on the mini in
 `~/.config/solar-heartbeats/solar.env` (mode `600`) and must not be shared or
 committed to this project. Healthchecks.io alerts are routed through the
 configured ntfy integration. The five checks were manually verified as up.
+
+The monthly usage projection runs after the 05:05 analysis refresh so it sees
+the latest month-end meter summaries. It sends the full projection output by
+email, including output from a failed run.
+
+To install and enable the monthly projection timer on the mini:
+
+```bash
+sudo install -m 644 systemd/solar-usage-projection.service /etc/systemd/system/
+sudo install -m 644 systemd/solar-usage-projection.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now solar-usage-projection.timer
+```
 
 To enable run-time measurement and failure signaling, install the Healthchecks
 drop-ins and reload systemd:
@@ -1196,6 +1217,16 @@ generic assumptions in the solar-system design.
 
 ## Annual PVGIS simulation: daily load inputs
 
+### Monthly usage source
+
+`solar_usage_projection.py` uses `monthly-usage.csv` for historical months that
+do not have a complete set of measured daily summaries. For a closed month with
+meter readings on every calendar date, it uses the sum of
+`daily_load_summary.total_energy_kwh`, matching the solar report's monthly
+total. This allows newly measured months, such as October 2026, to replace the
+older CSV estimate automatically; the current partial month is excluded until
+it closes.
+
 The PVGIS simulation uses two different household-load inputs:
 
 1. **Daily energy targets:** the `daily_load_projection` table supplies projected
@@ -1241,7 +1272,8 @@ python3 solar_outage_simulation_updated.py
 
 By default, **each outage starts with a fully charged battery**. This is the primary
 resilience case: the grid fails unexpectedly while the battery is full. The model
-uses a 15 kWh usable battery, 20% reserve and 8 kW inverter by default.
+uses a 15 kWh usable battery, 20% reserve and the inverter rating configured
+under `[solar] inverter_kw` in `config.ini` (currently 10 kW).
 
 A secondary mode starts each outage with the state of charge reached by the
 preceding normal grid-connected day:

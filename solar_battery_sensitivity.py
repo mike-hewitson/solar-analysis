@@ -48,7 +48,7 @@ def run_case(base_script, year, battery, root, solar_defaults, db_path, pv_cache
         inverter_kw=solar_defaults["inverter_kw"],
         geyser_start=mod.GEYSER_START,
         geyser_end=mod.GEYSER_END,
-        geyser_max_kw=mod.GEYSER_MAX_KW,
+        geyser_max_kw=solar_defaults["geyser_max_kw"],
         geyser_min_soc=0.20,
         geyser_load_shed_kw=None,
         geyser_restart_kw=None,

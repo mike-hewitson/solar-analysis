@@ -59,6 +59,7 @@ def load_solar_defaults(config):
         "battery_usable_kwh",
         "battery_reserve_percent",
         "initial_battery_soc_kwh",
+        "geyser_max_kw",
     ]
     missing = [key for key in required if not config.has_option(section, key)]
     if missing:
@@ -74,6 +75,7 @@ def load_solar_defaults(config):
         "battery": config.getfloat(section, "battery_usable_kwh"),
         "reserve": config.getfloat(section, "battery_reserve_percent"),
         "initial_soc": config.getfloat(section, "initial_battery_soc_kwh"),
+        "geyser_max_kw": config.getfloat(section, "geyser_max_kw"),
     }
 
 
@@ -103,7 +105,10 @@ def args(config):
     p.add_argument("--geyser-mode", choices=["measured", "solar-shift"], default="solar-shift")
     p.add_argument("--geyser-start", type=float, default=9.0)
     p.add_argument("--geyser-end", type=float, default=16.0)
-    p.add_argument("--geyser-max-kw", type=float, default=3.0)
+    p.add_argument(
+        "--geyser-max-kw", type=float, default=defaults["geyser_max_kw"],
+        help="Maximum geyser power in kW (default: [solar] geyser_max_kw from config.ini).",
+    )
     return p.parse_args()
 
 

@@ -46,14 +46,13 @@ LAT = -34.42
 LON = 19.24
 TZ = ZoneInfo("Africa/Johannesburg")
 
-TILT = 22
+TILT = 17
 LOSS_PCT = 14
 PVTECH = "crystSi"
 BATTERY_EFF = 0.95
 
 GEYSER_START = 9
 GEYSER_END = 16       # exclusive
-GEYSER_MAX_KW = 3.0
 
 
 def load_config():
@@ -74,6 +73,7 @@ def load_solar_defaults(config):
         "inverter_kw",
         "battery_usable_kwh",
         "battery_reserve_percent",
+        "geyser_max_kw",
     )
     missing = [key for key in required if not config.has_option("solar", key)]
     if missing:
@@ -87,6 +87,7 @@ def load_solar_defaults(config):
         "inverter_kw": config.getfloat("solar", "inverter_kw"),
         "battery_kwh": config.getfloat("solar", "battery_usable_kwh"),
         "reserve_frac": config.getfloat("solar", "battery_reserve_percent") / 100.0,
+        "geyser_max_kw": config.getfloat("solar", "geyser_max_kw"),
     }
 
 
@@ -119,7 +120,10 @@ def parse_args(solar_defaults):
     p.add_argument("--inverter-kw", type=float, default=solar_defaults["inverter_kw"])
     p.add_argument("--geyser-start", type=int, default=GEYSER_START)
     p.add_argument("--geyser-end", type=int, default=GEYSER_END)
-    p.add_argument("--geyser-max-kw", type=float, default=GEYSER_MAX_KW)
+    p.add_argument(
+        "--geyser-max-kw", type=float, default=solar_defaults["geyser_max_kw"],
+        help="Maximum geyser power in kW (default: [solar] geyser_max_kw from config.ini).",
+    )
     p.add_argument("--geyser-load-shed-kw", type=float, default=None,
                    help="Shed/defer geyser whenever total inverter load would exceed this kW")
     p.add_argument("--geyser-restart-kw", type=float, default=None,

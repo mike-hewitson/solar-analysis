@@ -59,8 +59,10 @@ def parse_args():
     p.add_argument("--output-dir", default="solar report/outage simulation")
     p.add_argument("--battery-kwh", type=float, default=15.0)
     p.add_argument("--reserve", type=float, default=0.20)
-    p.add_argument("--inverter-kw", type=float, default=8.0)
-    p.add_argument("--geyser-max-kw", type=float, default=3.0)
+    p.add_argument("--inverter-kw", type=float, default=None,
+                   help="Inverter rating in kW (default: [solar] inverter_kw from config.ini).")
+    p.add_argument("--geyser-max-kw", type=float, default=None,
+                   help="Maximum geyser power in kW (default: [solar] geyser_max_kw from config.ini).")
     p.add_argument(
         "--start-soc-mode",
         choices=("full", "normal"),
@@ -257,7 +259,7 @@ def simulate_outage(mod, pv, load_profile, projection, args,
                 total_battery_charge_input += charge_input
 
             # 4. Only PV surplus remaining after the battery is FULL can heat
-            # the geyser. The geyser is capped at 3 kW per hour.
+            # the geyser, up to the configured maximum geyser power.
             if surplus > 0 and soc >= args.battery_kwh - 1e-9:
                 geyser_heat = min(
                     surplus,
@@ -337,6 +339,10 @@ def main():
 
     mod = load_model(script)
     solar_defaults = mod.load_solar_defaults(mod.load_config())
+    if args.inverter_kw is None:
+        args.inverter_kw = solar_defaults["inverter_kw"]
+    if args.geyser_max_kw is None:
+        args.geyser_max_kw = solar_defaults["geyser_max_kw"]
 
     pv = build_pv(mod, args.year, cache, args.no_download, solar_defaults)
     load_profile = mod.load_complete_measured_day(db)
